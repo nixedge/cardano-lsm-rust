@@ -1,0 +1,17 @@
+packages: .
+
+-- Use a more recent index state
+index-state: 2025-01-01T00:00:00Z
+
+-- Allow newer versions across the board
+allow-newer: all
+
+-- Specific overrides for known issues
+constraints:
+  aeson >= 2.2,
+  text >= 2.0,
+  bytestring >= 0.12
+
+-- Relax bounds
+package conformance-generator
+  ghc-options: -Wwarn

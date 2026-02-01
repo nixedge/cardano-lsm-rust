@@ -1,0 +1,29 @@
+/target
+/Cargo.lock
+**/*.rs.bk
+*.pdb
+
+# Generated conformance tests
+/conformance-tests/
+
+# Haskell build artifacts
+dist-newstyle/
+dist/
+cabal.project.local
+.ghc.environment.*
+
+# Nix
+result
+result-*
+.direnv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,1029 @@
+// Cardano LSM Tree - Pure Rust port from Haskell lsm-tree
+// Core implementation
+
+mod sstable;
+mod compaction;
+mod merkle;
+mod monoidal;
+
+use std::path::{Path, PathBuf};
+use std::collections::BTreeMap;
+use std::sync::{Arc, RwLock};
+use serde::{Serialize, Deserialize};
+use std::fs::{File, OpenOptions};
+use std::io::{Write, Read, Seek, SeekFrom};
+use sstable::{SsTableWriter, SsTableHandle};
+use compaction::Compactor;
+
+// Re-export public types
+pub use merkle::{IncrementalMerkleTree, MerkleProof, MerkleRoot, MerkleLeaf, Direction, Hash, MerkleDiff, MerkleSnapshot};
+pub use monoidal::{Monoidal, MonoidalLsmTree, MonoidalSnapshot};
+
+pub type Result<T> = std::result::Result<T, Error>;
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+    
+    #[error("Serialization error: {0}")]
+    Serialization(String),
+    
+    #[error("Corruption detected: {0}")]
+    Corruption(String),
+    
+    #[error("Invalid operation: {0}")]
+    InvalidOperation(String),
+    
+    #[error("Bincode error: {0}")]
+    Bincode(#[from] bincode::Error),
+}
+
+// ===== Core Types =====
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct Key(Vec<u8>);
+
+impl Key {
+    pub fn from(bytes: impl AsRef<[u8]>) -> Self {
+        Key(bytes.as_ref().to_vec())
+    }
+    
+    pub fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl AsRef<[u8]> for Key {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Value(Vec<u8>);
+
+impl Value {
+    pub fn from(bytes: impl AsRef<[u8]>) -> Self {
+        Value(bytes.as_ref().to_vec())
+    }
+}
+
+impl AsRef<[u8]> for Value {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+// ===== Configuration =====
+
+#[derive(Clone, Debug)]
+pub struct LsmConfig {
+    // Memory settings
+    pub memtable_size: usize,
+    pub max_immutable_memtables: usize,
+    pub block_cache_size: usize,
+    
+    // Compaction
+    pub compaction_strategy: CompactionStrategy,
+    pub compaction_threads: usize,
+    pub level0_compaction_trigger: usize,
+    
+    // Bloom filters
+    pub bloom_filter_bits_per_key: usize,
+    pub bloom_filter_fp_rate: f64,
+    
+    // WAL
+    pub wal_sync_mode: WalSyncMode,
+    pub wal_max_size: usize,
+    
+    // Snapshots
+    pub max_snapshots_per_wallet: usize,
+    pub snapshot_interval: std::time::Duration,
+    
+    // SSTables
+    pub sstable_size: usize,
+    pub sstable_block_size: usize,
+    pub enable_compression: bool,
+    pub compression_algorithm: CompressionAlgorithm,
+    
+    // Checksums
+    pub enable_wal_checksums: bool,
+}
+
+impl Default for LsmConfig {
+    fn default() -> Self {
+        Self {
+            memtable_size: 64 * 1024 * 1024,
+            max_immutable_memtables: 2,
+            block_cache_size: 256 * 1024 * 1024,
+            
+            compaction_strategy: CompactionStrategy::Hybrid {
+                l0_strategy: Box::new(CompactionStrategy::Tiered {
+                    size_ratio: 4.0,
+                    min_merge_width: 4,
+                    max_merge_width: 10,
+                }),
+                ln_strategy: Box::new(CompactionStrategy::Leveled {
+                    size_ratio: 10.0,
+                    max_level: 7,
+                }),
+                transition_level: 2,
+            },
+            compaction_threads: 2,
+            level0_compaction_trigger: 4,
+            
+            bloom_filter_bits_per_key: 10,
+            bloom_filter_fp_rate: 0.01,
+            
+            wal_sync_mode: WalSyncMode::Periodic(100),
+            wal_max_size: 64 * 1024 * 1024,
+            
+            max_snapshots_per_wallet: 10,
+            snapshot_interval: std::time::Duration::from_secs(600),
+            
+            sstable_size: 64 * 1024 * 1024,
+            sstable_block_size: 4096,
+            enable_compression: true,
+            compression_algorithm: CompressionAlgorithm::Lz4,
+            
+            enable_wal_checksums: true,
+        }
+    }
+}
+
+// Re-export CompactionStrategy
+pub use compaction::CompactionStrategy;
+
+#[derive(Clone, Debug)]
+pub enum WalSyncMode {
+    Always,
+    Periodic(usize),
+    None,
+}
+
+#[derive(Clone, Debug)]
+pub enum CompressionAlgorithm {
+    None,
+    Lz4,
+    Snappy,
+}
+
+// ===== MemTable =====
+
+/// In-memory sorted write buffer
+struct MemTable {
+    data: BTreeMap<Key, Option<Value>>,  // None = tombstone (deleted)
+    size_bytes: usize,
+    sequence_number: u64,
+}
+
+impl MemTable {
+    fn new(sequence_number: u64) -> Self {
+        Self {
+            data: BTreeMap::new(),
+            size_bytes: 0,
+            sequence_number,
+        }
+    }
+    
+    fn insert(&mut self, key: Key, value: Value) {
+        let key_size = key.0.len();
+        let value_size = value.0.len();
+        
+        // Update size
+        if let Some(old_value) = self.data.get(&key) {
+            if let Some(v) = old_value {
+                self.size_bytes -= v.0.len();
+            }
+        } else {
+            self.size_bytes += key_size;
+        }
+        
+        self.size_bytes += value_size;
+        self.data.insert(key, Some(value));
+    }
+    
+    fn delete(&mut self, key: Key) {
+        let key_size = key.0.len();
+        
+        if let Some(old_value) = self.data.get(&key) {
+            if let Some(v) = old_value {
+                self.size_bytes -= v.0.len();
+            }
+        } else {
+            self.size_bytes += key_size;
+        }
+        
+        // Tombstone
+        self.data.insert(key, None);
+    }
+    
+    fn get(&self, key: &Key) -> Option<&Option<Value>> {
+        self.data.get(key)
+    }
+    
+    fn size_bytes(&self) -> usize {
+        self.size_bytes
+    }
+    
+    fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+    
+    fn iter(&self) -> impl Iterator<Item = (&Key, &Option<Value>)> {
+        self.data.iter()
+    }
+    
+    fn range<'a>(&'a self, from: &Key, to: &Key) -> impl Iterator<Item = (&'a Key, &'a Option<Value>)> + 'a {
+        if from > to {
+            // Return empty iterator for reversed bounds
+            return Box::new(std::iter::empty()) as Box<dyn Iterator<Item = (&'a Key, &'a Option<Value>)> + 'a>;
+        }
+        Box::new(self.data.range(from..=to))
+    }
+}
+
+// ===== Main LSM Tree =====
+
+pub struct LsmTree {
+    path: PathBuf,
+    config: LsmConfig,
+    
+    // In-memory components
+    memtable: Arc<RwLock<MemTable>>,
+    immutable_memtables: Arc<RwLock<Vec<Arc<MemTable>>>>,
+    
+    // Sequence number for ordering
+    sequence_number: Arc<RwLock<u64>>,
+    
+    // WAL
+    wal: Arc<RwLock<WriteAheadLog>>,
+    
+    // SSTables
+    sstables: Arc<RwLock<Vec<SsTableHandle>>>,
+    
+    // Compaction
+    compactor: Arc<Compactor>,
+}
+
+impl LsmTree {
+    pub fn open(path: impl AsRef<Path>, config: LsmConfig) -> Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        std::fs::create_dir_all(&path)?;
+        
+        // Create sstables directory
+        let sstables_dir = path.join("sstables");
+        std::fs::create_dir_all(&sstables_dir)?;
+        
+        // Open or create WAL
+        let wal_path = path.join("wal.log");
+        let mut wal = WriteAheadLog::open(&wal_path, config.wal_sync_mode.clone())?;
+        
+        let mut sequence_number = 0u64;
+        let mut memtable = MemTable::new(sequence_number);
+        
+        // Load existing SSTables
+        let mut sstables = Vec::new();
+        if sstables_dir.exists() {
+            for entry in std::fs::read_dir(&sstables_dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.extension().and_then(|s| s.to_str()) == Some("sst") {
+                    match SsTableHandle::open(path) {
+                        Ok(handle) => sstables.push(handle),
+                        Err(e) => eprintln!("Failed to load SSTable: {}", e),
+                    }
+                }
+            }
+        }
+        
+        // Sort SSTables by min_key (oldest first)
+        sstables.sort_by(|a, b| a.min_key.cmp(&b.min_key));
+        
+        // Create compactor
+        let compactor = Arc::new(Compactor::new(
+            config.compaction_strategy.clone(),
+            path.clone(),
+        ));
+        
+        // Replay WAL if it exists
+        if wal_path.exists() {
+            for entry in wal.replay()? {
+                sequence_number = sequence_number.max(entry.sequence_number);
+                match entry.operation {
+                    WalOperation::Insert { key, value } => {
+                        memtable.insert(key, value);
+                    }
+                    WalOperation::Delete { key } => {
+                        memtable.delete(key);
+                    }
+                }
+            }
+            sequence_number += 1;
+        }
+        
+        Ok(Self {
+            path,
+            config,
+            memtable: Arc::new(RwLock::new(memtable)),
+            immutable_memtables: Arc::new(RwLock::new(Vec::new())),
+            sequence_number: Arc::new(RwLock::new(sequence_number)),
+            wal: Arc::new(RwLock::new(wal)),
+            sstables: Arc::new(RwLock::new(sstables)),
+            compactor,
+        })
+    }
+    
+    pub fn insert(&mut self, key: &Key, value: &Value) -> Result<()> {
+        // Get next sequence number
+        let seq_num = {
+            let mut seq = self.sequence_number.write().unwrap();
+            let num = *seq;
+            *seq += 1;
+            num
+        };
+        
+        // Write to WAL first
+        {
+            let mut wal = self.wal.write().unwrap();
+            wal.append_insert(seq_num, key.clone(), value.clone())?;
+        }
+        
+        // Then write to memtable
+        {
+            let mut memtable = self.memtable.write().unwrap();
+            memtable.insert(key.clone(), value.clone());
+            
+            // Check if memtable is full
+            if memtable.size_bytes() >= self.config.memtable_size {
+                drop(memtable); // Release lock before flush
+                self.flush_memtable()?;
+            }
+        }
+        
+        Ok(())
+    }
+    
+    pub fn get(&self, key: &Key) -> Result<Option<Value>> {
+        // Check memtable first
+        {
+            let memtable = self.memtable.read().unwrap();
+            if let Some(value_opt) = memtable.get(key) {
+                return Ok(value_opt.clone());
+            }
+        }
+        
+        // Check immutable memtables
+        {
+            let immutables = self.immutable_memtables.read().unwrap();
+            for imm in immutables.iter().rev() {
+                if let Some(value_opt) = imm.get(key) {
+                    return Ok(value_opt.clone());
+                }
+            }
+        }
+        
+        // Check SSTables (newest to oldest)
+        {
+            let sstables = self.sstables.read().unwrap();
+            for sstable in sstables.iter().rev() {
+                // Check if key could be in this SSTable
+                if key >= &sstable.min_key && key <= &sstable.max_key {
+                    if let Some(value) = sstable.get(key)? {
+                        return Ok(Some(value));
+                    }
+                }
+            }
+        }
+        
+        Ok(None)
+    }
+    
+    pub fn delete(&mut self, key: &Key) -> Result<()> {
+        // Get next sequence number
+        let seq_num = {
+            let mut seq = self.sequence_number.write().unwrap();
+            let num = *seq;
+            *seq += 1;
+            num
+        };
+        
+        // Write to WAL
+        {
+            let mut wal = self.wal.write().unwrap();
+            wal.append_delete(seq_num, key.clone())?;
+        }
+        
+        // Write tombstone to memtable
+        {
+            let mut memtable = self.memtable.write().unwrap();
+            memtable.delete(key.clone());
+            
+            // Check if memtable is full
+            if memtable.size_bytes() >= self.config.memtable_size {
+                drop(memtable);
+                self.flush_memtable()?;
+            }
+        }
+        
+        Ok(())
+    }
+    
+    pub fn range(&self, from: &Key, to: &Key) -> RangeIter {
+        // Collect all entries from all levels
+        let mut entries: BTreeMap<Key, Option<Value>> = BTreeMap::new();
+        
+        // From SSTables (oldest, lowest priority)
+        {
+            let sstables = self.sstables.read().unwrap();
+            for sstable in sstables.iter() {
+                match sstable.range(from, to) {
+                    Ok(sstable_entries) => {
+                        for (k, v) in sstable_entries {
+                            entries.entry(k).or_insert(Some(v));
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Error reading from SSTable: {}", e);
+                    }
+                }
+            }
+        }
+        
+        // From immutable memtables
+        {
+            let immutables = self.immutable_memtables.read().unwrap();
+            for imm in immutables.iter() {
+                for (k, v) in imm.range(from, to) {
+                    entries.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        
+        // From current memtable (newest, highest priority)
+        {
+            let memtable = self.memtable.read().unwrap();
+            for (k, v) in memtable.range(from, to) {
+                entries.insert(k.clone(), v.clone());
+            }
+        }
+        
+        // Filter out tombstones and convert to Vec
+        let results: Vec<_> = entries
+            .into_iter()
+            .filter_map(|(k, v)| v.map(|val| (k, val)))
+            .collect();
+        
+        RangeIter {
+            entries: results,
+            index: 0,
+        }
+    }
+    
+    pub fn scan_prefix(&self, prefix: &[u8]) -> RangeIter {
+        // Create an end key by incrementing the last byte
+        let mut end_bytes = prefix.to_vec();
+        if let Some(last) = end_bytes.last_mut() {
+            if *last == 0xFF {
+                end_bytes.push(0x00);
+            } else {
+                *last += 1;
+            }
+        } else {
+            // Empty prefix matches everything
+            end_bytes = vec![0xFF; 20];
+        }
+        
+        self.range(&Key::from(prefix), &Key::from(&end_bytes))
+    }
+    
+    pub fn iter(&self) -> RangeIter {
+        self.range(&Key::from(b""), &Key::from(&[0xFF; 256]))
+    }
+    
+    pub fn flush(&self) -> Result<()> {
+        // Flush WAL
+        let mut wal = self.wal.write().unwrap();
+        wal.sync()?;
+        Ok(())
+    }
+    
+    fn flush_memtable(&mut self) -> Result<()> {
+        // Move current memtable to immutable list
+        let old_memtable = {
+            let mut memtable = self.memtable.write().unwrap();
+            let seq = *self.sequence_number.read().unwrap();
+            let new_memtable = MemTable::new(seq);
+            std::mem::replace(&mut *memtable, new_memtable)
+        };
+        
+        // Don't flush empty memtables
+        if old_memtable.is_empty() {
+            return Ok(());
+        }
+        
+        // Write to SSTable
+        let seq = old_memtable.sequence_number;
+        let sstable_path = self.path.join("sstables").join(format!("{:016x}.sst", seq));
+        
+        let mut writer = SsTableWriter::new(sstable_path)?;
+        
+        for (key, value_opt) in old_memtable.iter() {
+            writer.add(key.clone(), value_opt.clone());
+        }
+        
+        let handle = writer.finish()?;
+        
+        // Add to SSTable list
+        {
+            let mut sstables = self.sstables.write().unwrap();
+            sstables.push(handle);
+            
+            // Check if we should trigger compaction
+            if sstables.len() >= self.config.level0_compaction_trigger {
+                drop(sstables); // Release lock before compaction
+                // Trigger compaction
+                self.compact()?;
+            }
+        }
+        
+        // Clear WAL since data is now persisted
+        {
+            let mut wal = self.wal.write().unwrap();
+            wal.truncate_to(seq)?;
+        }
+        
+        Ok(())
+    }
+    
+    pub fn compact(&mut self) -> Result<()> {
+        let sstables = self.sstables.read().unwrap();
+        
+        // Select tables to compact
+        let job = match self.compactor.select_compaction(&sstables) {
+            Some(job) => job,
+            None => {
+                // Nothing to compact
+                return Ok(());
+            }
+        };
+        
+        drop(sstables); // Release read lock
+        
+        // Execute compaction
+        let sstables_for_compact = self.sstables.read().unwrap().clone();
+        let result = self.compactor.compact(job, &sstables_for_compact)?;
+        
+        // Update SSTable list
+        {
+            let mut sstables = self.sstables.write().unwrap();
+            
+            // Remove input SSTables (in reverse order to maintain indices)
+            let mut to_remove = result.inputs_to_remove.clone();
+            to_remove.sort_by(|a, b| b.cmp(a)); // Sort descending
+            
+            for idx in to_remove {
+                if idx < sstables.len() {
+                    let removed = sstables.remove(idx);
+                    // Delete the file
+                    if let Err(e) = std::fs::remove_file(&removed.path) {
+                        eprintln!("Failed to delete old SSTable: {}", e);
+                    }
+                }
+            }
+            
+            // Add output SSTable
+            if let Some(output) = result.output {
+                sstables.push(output);
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Compact ALL SSTables into one (removes all tombstones)
+    pub fn compact_all(&mut self) -> Result<()> {
+        let sstables = self.sstables.read().unwrap();
+        
+        if sstables.is_empty() {
+            return Ok(());
+        }
+        
+        // Create job with all SSTables
+        let all_indices: Vec<usize> = (0..sstables.len()).collect();
+        let job = compaction::CompactionJob {
+            inputs: all_indices,
+            strategy: self.config.compaction_strategy.clone(),
+        };
+        
+        drop(sstables);
+        
+        let sstables_for_compact = self.sstables.read().unwrap().clone();
+        let result = self.compactor.compact(job, &sstables_for_compact)?;
+        
+        // Update SSTable list
+        {
+            let mut sstables = self.sstables.write().unwrap();
+            
+            // Clear all old SSTables
+            for sstable in sstables.drain(..) {
+                if let Err(e) = std::fs::remove_file(&sstable.path) {
+                    eprintln!("Failed to delete old SSTable: {}", e);
+                }
+            }
+            
+            // Add the single compacted SSTable
+            if let Some(output) = result.output {
+                sstables.push(output);
+            }
+        }
+        
+        Ok(())
+    }
+    
+    pub fn trigger_background_compaction(&self) {
+        // For now, this is a no-op
+        // In a real implementation, this would signal a background thread
+        // to run compaction asynchronously
+    }
+    
+    pub fn wait_for_compaction(&self) {
+        // For now, this is a no-op
+        // In a real implementation, this would wait for background
+        // compaction to complete
+    }
+    
+    pub fn snapshot(&self) -> LsmSnapshot {
+        let memtable = self.memtable.read().unwrap();
+        let immutables = self.immutable_memtables.read().unwrap();
+        let sstables = self.sstables.read().unwrap();
+        let seq = *self.sequence_number.read().unwrap();
+        
+        LsmSnapshot {
+            memtable: Arc::new((*memtable).clone()),
+            immutable_memtables: immutables.clone(),
+            sstables: sstables.clone(),
+            sequence_number: seq,
+        }
+    }
+    
+    pub fn rollback(&mut self, snapshot: LsmSnapshot) -> Result<()> {
+        // Verify we're not rolling back to the future
+        let current_seq = *self.sequence_number.read().unwrap();
+        if snapshot.sequence_number > current_seq {
+            return Err(Error::InvalidOperation(
+                "Cannot rollback to future snapshot".to_string()
+            ));
+        }
+        
+        // Replace state
+        *self.memtable.write().unwrap() = (*snapshot.memtable).clone();
+        *self.immutable_memtables.write().unwrap() = snapshot.immutable_memtables;
+        *self.sstables.write().unwrap() = snapshot.sstables;
+        *self.sequence_number.write().unwrap() = snapshot.sequence_number;
+        
+        // Truncate WAL
+        let mut wal = self.wal.write().unwrap();
+        wal.truncate_to(snapshot.sequence_number)?;
+        
+        Ok(())
+    }
+    
+    pub fn disk_usage(&self) -> Result<u64> {
+        let mut total = 0u64;
+        
+        // Count SSTable sizes
+        let sstables = self.sstables.read().unwrap();
+        for sstable in sstables.iter() {
+            if let Ok(metadata) = std::fs::metadata(&sstable.path) {
+                total += metadata.len();
+            }
+        }
+        
+        // Add WAL size
+        total += self.wal_size()?;
+        
+        Ok(total)
+    }
+    
+    pub fn wal_size(&self) -> Result<u64> {
+        let wal = self.wal.read().unwrap();
+        wal.size()
+    }
+    
+    pub fn get_stats(&self) -> Result<LsmStats> {
+        let memtable = self.memtable.read().unwrap();
+        let immutables = self.immutable_memtables.read().unwrap();
+        let sstables = self.sstables.read().unwrap();
+        
+        Ok(LsmStats {
+            memtable_size_bytes: memtable.size_bytes() as u64,
+            immutable_memtables_count: immutables.len(),
+            l0_sstables_count: sstables.len(),
+            total_sstables_count: sstables.len(),
+            compactions_running: 0,
+            bloom_filter_false_positives: 0,
+        })
+    }
+}
+
+// Make MemTable cloneable for snapshots
+impl Clone for MemTable {
+    fn clone(&self) -> Self {
+        Self {
+            data: self.data.clone(),
+            size_bytes: self.size_bytes,
+            sequence_number: self.sequence_number,
+        }
+    }
+}
+
+// ===== Range Iterator =====
+
+pub struct RangeIter {
+    entries: Vec<(Key, Value)>,
+    index: usize,
+}
+
+impl Iterator for RangeIter {
+    type Item = (Key, Value);
+    
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index < self.entries.len() {
+            let item = self.entries[self.index].clone();
+            self.index += 1;
+            Some(item)
+        } else {
+            None
+        }
+    }
+}
+
+impl Clone for RangeIter {
+    fn clone(&self) -> Self {
+        Self {
+            entries: self.entries.clone(),
+            index: self.index,
+        }
+    }
+}
+
+// ===== Snapshot =====
+
+#[derive(Clone)]
+pub struct LsmSnapshot {
+    memtable: Arc<MemTable>,
+    immutable_memtables: Vec<Arc<MemTable>>,
+    sstables: Vec<SsTableHandle>,
+    sequence_number: u64,
+}
+
+impl LsmSnapshot {
+    pub fn sequence_number(&self) -> u64 {
+        self.sequence_number
+    }
+    
+    pub fn get(&self, key: &Key) -> Result<Option<Value>> {
+        // Check memtable
+        if let Some(value_opt) = self.memtable.get(key) {
+            return Ok(value_opt.clone());
+        }
+        
+        // Check immutable memtables
+        for imm in self.immutable_memtables.iter().rev() {
+            if let Some(value_opt) = imm.get(key) {
+                return Ok(value_opt.clone());
+            }
+        }
+        
+        // Check SSTables
+        for sstable in self.sstables.iter().rev() {
+            if key >= &sstable.min_key && key <= &sstable.max_key {
+                if let Some(value) = sstable.get(key)? {
+                    return Ok(Some(value));
+                }
+            }
+        }
+        
+        Ok(None)
+    }
+    
+    pub fn iter(&self) -> RangeIter {
+        let mut entries: BTreeMap<Key, Option<Value>> = BTreeMap::new();
+        
+        // Collect from SSTables
+        for sstable in &self.sstables {
+            if let Ok(sstable_entries) = sstable.range(&Key::from(b""), &Key::from(&[0xFF; 256])) {
+                for (k, v) in sstable_entries {
+                    entries.entry(k).or_insert(Some(v));
+                }
+            }
+        }
+        
+        // Collect from immutables
+        for imm in &self.immutable_memtables {
+            for (k, v) in imm.iter() {
+                entries.insert(k.clone(), v.clone());
+            }
+        }
+        
+        // Collect from memtable (highest priority)
+        for (k, v) in self.memtable.iter() {
+            entries.insert(k.clone(), v.clone());
+        }
+        
+        // Filter tombstones
+        let results: Vec<_> = entries
+            .into_iter()
+            .filter_map(|(k, v)| v.map(|val| (k, val)))
+            .collect();
+        
+        RangeIter {
+            entries: results,
+            index: 0,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct LsmStats {
+    pub memtable_size_bytes: u64,
+    pub immutable_memtables_count: usize,
+    pub l0_sstables_count: usize,
+    pub total_sstables_count: usize,
+    pub compactions_running: usize,
+    pub bloom_filter_false_positives: u64,
+}
+
+// ===== Write-Ahead Log =====
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+enum WalOperation {
+    Insert { key: Key, value: Value },
+    Delete { key: Key },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct WalEntry {
+    sequence_number: u64,
+    operation: WalOperation,
+    checksum: u32,
+}
+
+struct WriteAheadLog {
+    file: File,
+    sync_mode: WalSyncMode,
+    write_counter: usize,
+    current_size: u64,
+}
+
+impl WriteAheadLog {
+    fn open(path: &Path, sync_mode: WalSyncMode) -> Result<Self> {
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .append(true)
+            .open(path)?;
+        
+        let current_size = file.metadata()?.len();
+        
+        Ok(Self {
+            file,
+            sync_mode,
+            write_counter: 0,
+            current_size,
+        })
+    }
+    
+    fn append_insert(&mut self, sequence_number: u64, key: Key, value: Value) -> Result<()> {
+        let operation = WalOperation::Insert { key, value };
+        self.append_entry(sequence_number, operation)
+    }
+    
+    fn append_delete(&mut self, sequence_number: u64, key: Key) -> Result<()> {
+        let operation = WalOperation::Delete { key };
+        self.append_entry(sequence_number, operation)
+    }
+    
+    fn append_entry(&mut self, sequence_number: u64, operation: WalOperation) -> Result<()> {
+        // Serialize entry
+        let entry_bytes = bincode::serialize(&operation)?;
+        
+        // Calculate checksum
+        let checksum = crc32fast::hash(&entry_bytes);
+        
+        let entry = WalEntry {
+            sequence_number,
+            operation,
+            checksum,
+        };
+        
+        // Serialize full entry with checksum
+        let full_bytes = bincode::serialize(&entry)?;
+        
+        // Write length prefix
+        let len = full_bytes.len() as u32;
+        self.file.write_all(&len.to_le_bytes())?;
+        
+        // Write entry
+        self.file.write_all(&full_bytes)?;
+        
+        self.current_size += 4 + full_bytes.len() as u64;
+        self.write_counter += 1;
+        
+        // Sync based on mode
+        match &self.sync_mode {
+            WalSyncMode::Always => {
+                self.file.sync_all()?;
+            }
+            WalSyncMode::Periodic(n) => {
+                if self.write_counter >= *n {
+                    self.file.sync_all()?;
+                    self.write_counter = 0;
+                }
+            }
+            WalSyncMode::None => {
+                // No sync
+            }
+        }
+        
+        Ok(())
+    }
+    
+    fn replay(&mut self) -> Result<Vec<WalEntry>> {
+        let mut entries = Vec::new();
+        
+        // Seek to beginning
+        self.file.seek(SeekFrom::Start(0))?;
+        
+        loop {
+            // Read length
+            let mut len_bytes = [0u8; 4];
+            match self.file.read_exact(&mut len_bytes) {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(e.into()),
+            }
+            
+            let len = u32::from_le_bytes(len_bytes) as usize;
+            
+            // Read entry
+            let mut entry_bytes = vec![0u8; len];
+            match self.file.read_exact(&mut entry_bytes) {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    // Partial entry, stop here
+                    break;
+                }
+                Err(e) => return Err(e.into()),
+            }
+            
+            // Deserialize
+            match bincode::deserialize::<WalEntry>(&entry_bytes) {
+                Ok(entry) => {
+                    // Verify checksum
+                    let operation_bytes = bincode::serialize(&entry.operation)?;
+                    let computed_checksum = crc32fast::hash(&operation_bytes);
+                    
+                    if computed_checksum == entry.checksum {
+                        entries.push(entry);
+                    } else {
+                        // Checksum mismatch, stop replay
+                        eprintln!("WAL checksum mismatch, stopping replay");
+                        break;
+                    }
+                }
+                Err(_) => {
+                    // Corruption, stop replay
+                    eprintln!("WAL entry corruption, stopping replay");
+                    break;
+                }
+            }
+        }
+        
+        Ok(entries)
+    }
+    
+    fn sync(&mut self) -> Result<()> {
+        self.file.sync_all()?;
+        Ok(())
+    }
+    
+    fn truncate_to(&mut self, _sequence_number: u64) -> Result<()> {
+        // For now, just clear the WAL
+        // TODO: Implement proper truncation to specific sequence number
+        self.file.set_len(0)?;
+        self.file.seek(SeekFrom::Start(0))?;
+        self.current_size = 0;
+        Ok(())
+    }
+    
+    fn size(&self) -> Result<u64> {
+        Ok(self.current_size)
+    }
+}
+
+// End of lib.rs
+
+// ===== Monoidal LSM Tree =====
