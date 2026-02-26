@@ -1,0 +1,75 @@
+cabal-version:      3.0
+name:               conformance-generator
+version:            0.1.0.0
+synopsis:           Generate conformance tests for LSM tree implementations
+description:        
+  Generates random operation sequences using QuickCheck and the Haskell
+  lsm-tree reference implementation, outputting test cases and expected
+  results in JSON format for cross-language conformance testing.
+  .
+  This enables property-based validation of the Rust LSM tree port against
+  the Haskell reference, similar to how Cardano validates the Haskell ledger
+  against the Agda specification.
+
+license:            Apache-2.0
+license-file:       LICENSE
+author:             Cardano LSM Contributors
+maintainer:         cardano-lsm@example.com
+category:           Testing, Database
+build-type:         Simple
+extra-source-files: CHANGELOG.md
+
+common warnings
+    ghc-options: 
+      -Wall
+      -Wcompat
+      -Widentities
+      -Wincomplete-record-updates
+      -Wincomplete-uni-patterns
+      -Wmissing-home-modules
+      -Wpartial-fields
+      -Wredundant-constraints
+
+library
+    import:           warnings
+    exposed-modules:  ConformanceGen
+    
+    build-depends:    
+        base >= 4.14 && < 5
+      , QuickCheck
+      , aeson
+      , bytestring
+      , base64-bytestring
+      , text
+      , containers
+      , random
+      , directory
+      , filepath
+      , temporary
+    
+    hs-source-dirs:   src
+    default-language: GHC2021
+    default-extensions:
+        OverloadedStrings
+        DeriveGeneric
+        LambdaCase
+        RecordWildCards
+
+executable conformance-generator
+    import:           warnings
+    main-is:          Main.hs
+    
+    build-depends:    
+        base
+      , conformance-generator
+      , aeson
+      , bytestring
+      , filepath
+      , directory
+    
+    hs-source-dirs:   app
+    default-language: GHC2021
+    ghc-options:      -threaded -rtsopts -with-rtsopts=-N
+    default-extensions:
+        OverloadedStrings
+        RecordWildCards
