@@ -378,7 +378,113 @@ impl LsmTree {
             compactor,
         })
     }
-    
+
+    /// Open an LSM tree from a saved snapshot
+    ///
+    /// This loads a snapshot from disk and restores the LSM tree to its state
+    /// at the time the snapshot was created. The snapshot directory becomes the
+    /// new active directory, allowing the tree to continue operating from that point.
+    ///
+    /// # Arguments
+    /// * `path` - Base directory (e.g., "/data/lsm")
+    /// * `snapshot_name` - Name of snapshot to open (e.g., "block_123456")
+    ///
+    /// # Example
+    /// ```no_run
+    /// use cardano_lsm::{LsmTree, LsmConfig};
+    ///
+    /// // Restore from snapshot
+    /// let tree = LsmTree::open_snapshot("/data/lsm", "block_123456").unwrap();
+    /// ```
+    pub fn open_snapshot(path: impl AsRef<Path>, snapshot_name: &str) -> Result<Self> {
+        let path = path.as_ref().to_path_buf();
+
+        // Load snapshot metadata
+        let snapshot = snapshot::PersistentSnapshot::load(&path, snapshot_name)?;
+        let config = snapshot.metadata.config.clone();
+        let sequence_number = snapshot.metadata.sequence_number;
+
+        // Acquire session lock
+        let session_lock = SessionLock::acquire(&path)
+            .map_err(|e| Error::SessionLocked(e.to_string()))?;
+
+        // Create directory structure
+        let active_dir = path.join("active");
+        std::fs::create_dir_all(&active_dir)?;
+
+        let snapshots_dir = path.join("snapshots");
+        std::fs::create_dir_all(&snapshots_dir)?;
+
+        // Fsync directories
+        fsync_directory(&path)?;
+        fsync_directory(&active_dir)?;
+        fsync_directory(&snapshots_dir)?;
+
+        // Initialize memtable with snapshot's sequence number
+        let memtable = MemTable::new(sequence_number);
+
+        // Open SSTables from snapshot directory
+        let snapshot_dir = snapshots_dir.join(snapshot_name);
+        let mut all_sstables = Vec::new();
+        let mut max_run_number = 0u64;
+
+        for run in &snapshot.metadata.runs {
+            match SsTableHandle::open(&snapshot_dir, run.run_number) {
+                Ok(handle) => {
+                    all_sstables.push(handle);
+                    max_run_number = max_run_number.max(run.run_number);
+                }
+                Err(e) => {
+                    return Err(Error::InvalidOperation(
+                        format!("Failed to load SSTable run {} from snapshot: {}", run.run_number, e)
+                    ));
+                }
+            }
+        }
+
+        // Next run number starts after the highest from snapshot
+        let next_run_number = max_run_number + 1;
+
+        // Organize SSTables by level (default max_level = 6)
+        let max_level = 6;
+        let mut levels: Vec<Vec<SsTableHandle>> = (0..=max_level).map(|_| Vec::new()).collect();
+
+        for handle in all_sstables {
+            let level = handle.level as usize;
+            if level <= max_level as usize {
+                levels[level].push(handle);
+            } else {
+                eprintln!("Warning: SSTable with level {} exceeds max_level {}", level, max_level);
+            }
+        }
+
+        // Sort each level by min_key
+        for level in &mut levels {
+            level.sort_by(|a, b| a.min_key.cmp(&b.min_key));
+        }
+
+        // Create compactor
+        let compactor = Arc::new(Compactor::new(
+            config.compaction_strategy.clone(),
+            path.clone(),
+        ));
+
+        Ok(Self {
+            active_dir,
+            snapshots_dir,
+            path,
+            config,
+            _session_lock: session_lock,
+            memtable: Arc::new(RwLock::new(memtable)),
+            immutable_memtables: Arc::new(RwLock::new(Vec::new())),
+            sequence_number: Arc::new(RwLock::new(sequence_number)),
+            next_run_number: Arc::new(RwLock::new(next_run_number)),
+            levels: Arc::new(RwLock::new(levels)),
+            max_level,
+            compactor,
+        })
+    }
+
     pub fn insert(&mut self, key: &Key, value: &Value) -> Result<()> {
         // Ephemeral write - only persisted via save_snapshot()
         // No WAL, writes lost on crash until snapshot is saved
