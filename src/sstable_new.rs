@@ -231,7 +231,7 @@ impl SsTableWriter {
 /// Uses reference counting to support hard-links: multiple handles
 /// can reference the same physical files (via hard-links), and files
 /// are only deleted when the last reference is dropped.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct SsTableHandle {
     paths: RunPaths,
     pub min_key: Key,
@@ -552,6 +552,24 @@ impl Drop for SsTableHandle {
         if prev == 1 {
             // Ignore errors during cleanup
             let _ = self.delete_files();
+        }
+    }
+}
+
+impl Clone for SsTableHandle {
+    fn clone(&self) -> Self {
+        // Increment refcount when cloning
+        self.refcount.fetch_add(1, Ordering::SeqCst);
+
+        Self {
+            paths: self.paths.clone(),
+            min_key: self.min_key.clone(),
+            max_key: self.max_key.clone(),
+            num_entries: self.num_entries,
+            level: self.level,
+            bloom_filter: self.bloom_filter.clone(),
+            index: self.index.clone(),
+            refcount: self.refcount.clone(),
         }
     }
 }

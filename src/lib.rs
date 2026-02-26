@@ -630,11 +630,10 @@ impl LsmTree {
 
             for idx in to_remove {
                 if idx < levels[source_level].len() {
-                    let removed = levels[source_level].remove(idx);
-                    // Delete all files for this SSTable run
-                    if let Err(e) = removed.delete_files() {
-                        eprintln!("Failed to delete old SSTable: {}", e);
-                    }
+                    let _removed = levels[source_level].remove(idx);
+                    // The SsTableHandle will be dropped here, but files are only deleted
+                    // when the last reference is dropped (refcount reaches 0). This allows
+                    // ongoing range queries to safely access the files.
                 }
             }
 
@@ -643,11 +642,8 @@ impl LsmTree {
                 // For bottom level (leveling): replace all runs with merged run
                 if target_level == self.max_level as usize {
                     // Clear target level and add single merged run
-                    for old_run in levels[target_level].drain(..) {
-                        if let Err(e) = old_run.delete_files() {
-                            eprintln!("Failed to delete old SSTable: {}", e);
-                        }
-                    }
+                    // Old handles will be dropped but files are protected by refcounting
+                    levels[target_level].clear();
                     levels[target_level].push(output);
                 } else {
                     // For other levels (tiering): just add the new run
@@ -693,12 +689,9 @@ impl LsmTree {
             let mut levels = self.levels.write().unwrap();
 
             // Clear all old SSTables from all levels
+            // Old handles will be dropped but files are protected by refcounting
             for level in levels.iter_mut() {
-                for sstable in level.drain(..) {
-                    if let Err(e) = sstable.delete_files() {
-                        eprintln!("Failed to delete old SSTable: {}", e);
-                    }
-                }
+                level.clear();
             }
 
             // Add the single compacted SSTable to max level
