@@ -185,8 +185,8 @@ impl Compactor {
             bytes_written += key_len + value_len;
             writer.add(key, value_opt);
         }
-        
-        let output_handle = writer.finish()?;
+
+        let output_handle = writer.finish(0)?;  // TODO: use proper target level from LazyLevelling policy
         
         Ok(CompactionResult {
             output: Some(output_handle),

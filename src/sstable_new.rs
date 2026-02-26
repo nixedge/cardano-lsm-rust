@@ -129,7 +129,7 @@ impl SsTableWriter {
     /// 7. Fsyncs directory
     ///
     /// Returns a handle to the completed SSTable.
-    pub fn finish(mut self) -> Result<SsTableHandle> {
+    pub fn finish(mut self, level: u8) -> Result<SsTableHandle> {
         if self.entries.is_empty() {
             return Err(Error::InvalidOperation("Cannot create empty SSTable".to_string()));
         }
@@ -215,6 +215,7 @@ impl SsTableWriter {
             min_key,
             max_key,
             num_entries,
+            level,
             bloom_filter,
             index,
             refcount: Arc::new(AtomicUsize::new(1)), // Initial refcount = 1
@@ -235,6 +236,7 @@ pub struct SsTableHandle {
     pub min_key: Key,
     pub max_key: Key,
     pub num_entries: u64,
+    pub level: u8,  // 0 = L0 (fresh flushes), 1-6 = L1-L6
     bloom_filter: BloomFilter,
     index: Index,
 
@@ -303,6 +305,7 @@ impl SsTableHandle {
             min_key,
             max_key,
             num_entries,
+            level: 0,  // Default to L0 for existing SSTables without level metadata
             bloom_filter,
             index,
             refcount: Arc::new(AtomicUsize::new(1)), // Initial refcount = 1
@@ -402,6 +405,7 @@ impl SsTableHandle {
             min_key: self.min_key.clone(),
             max_key: self.max_key.clone(),
             num_entries: self.num_entries,
+            level: self.level,  // Preserve level
             bloom_filter: self.bloom_filter.clone(),
             index: self.index.clone(),
             refcount: Arc::clone(&self.refcount), // Share refcount
@@ -562,7 +566,7 @@ mod tests {
         writer.add(Key::from(b"key1"), Some(Value::from(b"value1")))?;
         writer.add(Key::from(b"key2"), Some(Value::from(b"value2")))?;
         writer.add(Key::from(b"key3"), None)?; // Delete
-        let handle = writer.finish()?;
+        let handle = writer.finish(0)?;
 
         // Verify handle
         assert_eq!(handle.num_entries, 3);
@@ -597,7 +601,7 @@ mod tests {
         // Create SSTable in active/
         let mut writer = SsTableWriter::new(&active_dir, 1)?;
         writer.add(Key::from(b"key1"), Some(Value::from(b"value1")))?;
-        let handle1 = writer.finish()?;
+        let handle1 = writer.finish(0)?;
 
         // Hard-link to snapshot directory
         let handle2 = handle1.hard_link_to(&snapshot_dir, 100)
@@ -642,7 +646,7 @@ mod tests {
         // Create SSTable
         let mut writer = SsTableWriter::new(active_dir, 1)?;
         writer.add(Key::from(b"key1"), Some(Value::from(b"value1")))?;
-        let handle = writer.finish()?;
+        let handle = writer.finish(0)?;
 
         // Initial refcount = 1
         assert_eq!(handle.refcount.load(Ordering::SeqCst), 1);
@@ -667,7 +671,7 @@ mod tests {
         // Create SSTable
         let mut writer = SsTableWriter::new(&active_dir, 1)?;
         writer.add(Key::from(b"key1"), Some(Value::from(b"value1")))?;
-        let handle1 = writer.finish()?;
+        let handle1 = writer.finish(0)?;
 
         // Create multiple hard-links
         let snap1_dir = dir.path().join("snap1");
