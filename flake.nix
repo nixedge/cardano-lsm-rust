@@ -8,6 +8,24 @@
     naersk.inputs.nixpkgs.follows = "nixpkgs";
     treefmt-nix.url = "github:numtide/treefmt-nix";
     treefmt-nix.inputs.nixpkgs.follows = "nixpkgs";
+    
+    # Haskell.nix for IOG Haskell projects
+    haskellNix = {
+      url = "github:input-output-hk/haskell.nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    
+    # CHaP (Cardano Haskell Packages) - IOG's package repository
+    CHaP = {
+      url = "github:intersectmbo/cardano-haskell-packages?ref=repo";
+      flake = false;
+    };
+    
+    # Haskell lsm-tree reference implementation
+    lsm-tree-haskell = {
+      url = "github:input-output-hk/lsm-tree";
+      flake = false;
+    };
   };
 
   outputs = {

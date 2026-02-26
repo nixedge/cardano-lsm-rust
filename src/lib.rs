@@ -1,6 +1,8 @@
 // Cardano LSM Tree - Pure Rust port from Haskell lsm-tree
 // Core implementation
 
+mod checksum;
+mod checksum_handle;
 mod sstable;
 mod compaction;
 mod merkle;
