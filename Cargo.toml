@@ -43,6 +43,15 @@ crossbeam = "0.8"
 # Utilities
 bytes = "1.5"
 crc32fast = "1.3"
+hostname = "0.3"
+uuid = { version = "1.6", features = ["v4"] }
+
+# Platform-specific dependencies
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = ["fileapi", "handleapi", "minwinbase", "processthreadsapi", "winnt"] }
 
 [dev-dependencies]
 # Testing

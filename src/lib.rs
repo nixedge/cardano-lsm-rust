@@ -4,6 +4,7 @@
 mod atomic_file;
 mod checksum;
 mod checksum_handle;
+mod session_lock;
 mod sstable;
 mod sstable_new;  // New Haskell-format SSTable (will replace sstable.rs)
 mod compaction;
@@ -19,6 +20,7 @@ use std::io::{Write, Read, Seek, SeekFrom};
 use sstable_new::{SsTableWriter, SsTableHandle, RunNumber};
 use compaction::Compactor;
 use atomic_file::fsync_directory;
+use session_lock::SessionLock;
 
 // Re-export public types
 pub use merkle::{IncrementalMerkleTree, MerkleProof, MerkleRoot, MerkleLeaf, Direction, Hash, MerkleDiff, MerkleSnapshot};
@@ -30,16 +32,19 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Error {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
-    
+
     #[error("Serialization error: {0}")]
     Serialization(String),
-    
+
     #[error("Corruption detected: {0}")]
     Corruption(String),
-    
+
     #[error("Invalid operation: {0}")]
     InvalidOperation(String),
-    
+
+    #[error("Session locked: {0}")]
+    SessionLocked(String),
+
     #[error("Bincode error: {0}")]
     Bincode(#[from] bincode::Error),
 }
@@ -257,6 +262,9 @@ pub struct LsmTree {
     snapshots_dir: PathBuf,  // snapshots/ - persistent snapshots
     config: LsmConfig,
 
+    // Session lock - prevents concurrent access
+    _session_lock: SessionLock,
+
     // In-memory components
     memtable: Arc<RwLock<MemTable>>,
     immutable_memtables: Arc<RwLock<Vec<Arc<MemTable>>>>,
@@ -281,11 +289,18 @@ impl LsmTree {
     pub fn open(path: impl AsRef<Path>, config: LsmConfig) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
 
+        // Create directory first
+        std::fs::create_dir_all(&path)?;
+
+        // Acquire session lock FIRST (before any other file operations)
+        // This prevents concurrent access that could corrupt the database
+        let session_lock = SessionLock::acquire(&path)
+            .map_err(|e| Error::SessionLocked(e.to_string()))?;
+
         // Create directory structure matching Haskell:
         // root/
         //   active/    - Active SSTables (mutable, being written/compacted)
         //   snapshots/ - Persistent snapshots (immutable, hard-linked files)
-        std::fs::create_dir_all(&path)?;
 
         let active_dir = path.join("active");
         std::fs::create_dir_all(&active_dir)?;
@@ -365,6 +380,7 @@ impl LsmTree {
             snapshots_dir,
             path,
             config,
+            _session_lock: session_lock,
             memtable: Arc::new(RwLock::new(memtable)),
             immutable_memtables: Arc::new(RwLock::new(Vec::new())),
             sequence_number: Arc::new(RwLock::new(sequence_number)),
