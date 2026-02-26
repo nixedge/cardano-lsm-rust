@@ -256,8 +256,14 @@ pub struct LsmTree {
     // Next run number for SSTable creation
     next_run_number: Arc<RwLock<RunNumber>>,
 
-    // SSTables
-    sstables: Arc<RwLock<Vec<SsTableHandle>>>,
+    // SSTables organized by level
+    // levels[0] = L0 (fresh flushes, multiple runs)
+    // levels[1] = L1, levels[2] = L2, etc.
+    // Last level uses leveling (single merged run)
+    levels: Arc<RwLock<Vec<Vec<SsTableHandle>>>>,
+
+    // Maximum level (typically 6-7 for LSM trees)
+    max_level: u8,
 
     // Compaction
     compactor: Arc<Compactor>,
@@ -297,7 +303,7 @@ impl LsmTree {
 
         // Load existing SSTables from active/ directory
         // Discover run numbers by looking for .keyops files
-        let mut sstables = Vec::new();
+        let mut all_sstables = Vec::new();
         let mut max_run_number = 0u64;
 
         for entry in std::fs::read_dir(&active_dir)? {
@@ -313,7 +319,7 @@ impl LsmTree {
                             max_run_number = max_run_number.max(run_num);
 
                             match SsTableHandle::open(&active_dir, run_num) {
-                                Ok(handle) => sstables.push(handle),
+                                Ok(handle) => all_sstables.push(handle),
                                 Err(e) => eprintln!("Failed to load SSTable run {}: {}", run_num, e),
                             }
                         }
@@ -324,9 +330,24 @@ impl LsmTree {
 
         // Next run number starts after the highest existing one
         let next_run_number = max_run_number + 1;
-        
-        // Sort SSTables by min_key (oldest first)
-        sstables.sort_by(|a, b| a.min_key.cmp(&b.min_key));
+
+        // Organize SSTables by level (default max_level = 6)
+        let max_level = 6;
+        let mut levels: Vec<Vec<SsTableHandle>> = (0..=max_level).map(|_| Vec::new()).collect();
+
+        for handle in all_sstables {
+            let level = handle.level as usize;
+            if level <= max_level as usize {
+                levels[level].push(handle);
+            } else {
+                eprintln!("Warning: SSTable with level {} exceeds max_level {}", level, max_level);
+            }
+        }
+
+        // Sort each level by min_key
+        for level in &mut levels {
+            level.sort_by(|a, b| a.min_key.cmp(&b.min_key));
+        }
         
         // Create compactor
         let compactor = Arc::new(Compactor::new(
@@ -344,7 +365,8 @@ impl LsmTree {
             immutable_memtables: Arc::new(RwLock::new(Vec::new())),
             sequence_number: Arc::new(RwLock::new(sequence_number)),
             next_run_number: Arc::new(RwLock::new(next_run_number)),
-            sstables: Arc::new(RwLock::new(sstables)),
+            levels: Arc::new(RwLock::new(levels)),
+            max_level,
             compactor,
         })
     }
@@ -387,19 +409,21 @@ impl LsmTree {
             }
         }
         
-        // Check SSTables (newest to oldest)
+        // Check SSTables (newest to oldest, L0 to Lmax)
         {
-            let sstables = self.sstables.read().unwrap();
-            for sstable in sstables.iter().rev() {
-                // Check if key could be in this SSTable
-                if key >= &sstable.min_key && key <= &sstable.max_key {
-                    if let Some(value) = sstable.get(key)? {
-                        return Ok(Some(value));
+            let levels = self.levels.read().unwrap();
+            for level in levels.iter() {
+                for sstable in level.iter().rev() {
+                    // Check if key could be in this SSTable
+                    if key >= &sstable.min_key && key <= &sstable.max_key {
+                        if let Some(value) = sstable.get(key)? {
+                            return Ok(Some(value));
+                        }
                     }
                 }
             }
         }
-        
+
         Ok(None)
     }
     
@@ -425,19 +449,21 @@ impl LsmTree {
     pub fn range(&self, from: &Key, to: &Key) -> RangeIter {
         // Collect all entries from all levels
         let mut entries: BTreeMap<Key, Option<Value>> = BTreeMap::new();
-        
-        // From SSTables (oldest, lowest priority)
+
+        // From SSTables (lowest level first, lowest priority)
         {
-            let sstables = self.sstables.read().unwrap();
-            for sstable in sstables.iter() {
-                match sstable.range(from, to) {
-                    Ok(sstable_entries) => {
-                        for (k, v) in sstable_entries {
-                            entries.entry(k).or_insert(v);
+            let levels = self.levels.read().unwrap();
+            for level in levels.iter().rev() {
+                for sstable in level.iter() {
+                    match sstable.range(from, to) {
+                        Ok(sstable_entries) => {
+                            for (k, v) in sstable_entries {
+                                entries.entry(k).or_insert(v);
+                            }
                         }
-                    }
-                    Err(e) => {
-                        eprintln!("Error reading from SSTable: {}", e);
+                        Err(e) => {
+                            eprintln!("Error reading from SSTable: {}", e);
+                        }
                     }
                 }
             }
@@ -530,14 +556,14 @@ impl LsmTree {
 
         let handle = writer.finish(0)?;  // Flushes always go to L0
 
-        // Add to SSTable list
+        // Add to L0
         {
-            let mut sstables = self.sstables.write().unwrap();
-            sstables.push(handle);
+            let mut levels = self.levels.write().unwrap();
+            levels[0].push(handle);
 
-            // Check if we should trigger compaction
-            if sstables.len() >= self.config.level0_compaction_trigger {
-                drop(sstables); // Release lock before compaction
+            // Check if we should trigger compaction (L0 size trigger)
+            if levels[0].len() >= self.config.level0_compaction_trigger {
+                drop(levels); // Release lock before compaction
                 // Trigger compaction
                 self.compact()?;
             }
@@ -547,18 +573,26 @@ impl LsmTree {
     }
     
     pub fn compact(&mut self) -> Result<()> {
-        let sstables = self.sstables.read().unwrap();
+        // TODO: Implement LazyLevelling compaction policy
+        // For now, collect all L0 SSTables into a flat list and compact them
+
+        let all_sstables = {
+            let levels = self.levels.read().unwrap();
+            levels[0].clone()  // Only compact L0 for now
+        };
+
+        if all_sstables.is_empty() {
+            return Ok(());
+        }
 
         // Select tables to compact
-        let job = match self.compactor.select_compaction(&*sstables) {
+        let job = match self.compactor.select_compaction(&all_sstables) {
             Some(job) => job,
             None => {
                 // Nothing to compact
                 return Ok(());
             }
         };
-        
-        drop(sstables); // Release read lock
 
         // Get next run number for compacted SSTable
         let run_number = {
@@ -569,52 +603,53 @@ impl LsmTree {
         };
 
         // Execute compaction
-        let sstables_for_compact = self.sstables.read().unwrap().clone();
-        let result = self.compactor.compact(job, &sstables_for_compact, &self.active_dir, run_number)?;
-        
-        // Update SSTable list
+        let result = self.compactor.compact(job, &all_sstables, &self.active_dir, run_number)?;
+
+        // Update level 0
         {
-            let mut sstables = self.sstables.write().unwrap();
-            
+            let mut levels = self.levels.write().unwrap();
+
             // Remove input SSTables (in reverse order to maintain indices)
             let mut to_remove = result.inputs_to_remove.clone();
             to_remove.sort_by(|a, b| b.cmp(a)); // Sort descending
-            
+
             for idx in to_remove {
-                if idx < sstables.len() {
-                    let removed = sstables.remove(idx);
+                if idx < levels[0].len() {
+                    let removed = levels[0].remove(idx);
                     // Delete all files for this SSTable run
                     if let Err(e) = removed.delete_files() {
                         eprintln!("Failed to delete old SSTable: {}", e);
                     }
                 }
             }
-            
-            // Add output SSTable
+
+            // Add output SSTable back to L0 for now
             if let Some(output) = result.output {
-                sstables.push(output);
+                levels[0].push(output);
             }
         }
-        
+
         Ok(())
     }
     
     /// Compact ALL SSTables into one (removes all tombstones)
     pub fn compact_all(&mut self) -> Result<()> {
-        let sstables = self.sstables.read().unwrap();
-        
-        if sstables.is_empty() {
+        // Collect all SSTables from all levels
+        let all_sstables: Vec<SsTableHandle> = {
+            let levels = self.levels.read().unwrap();
+            levels.iter().flat_map(|level| level.clone()).collect()
+        };
+
+        if all_sstables.is_empty() {
             return Ok(());
         }
-        
+
         // Create job with all SSTables
-        let all_indices: Vec<usize> = (0..sstables.len()).collect();
+        let all_indices: Vec<usize> = (0..all_sstables.len()).collect();
         let job = compaction::CompactionJob {
             inputs: all_indices,
             strategy: self.config.compaction_strategy.clone(),
         };
-        
-        drop(sstables);
 
         // Get next run number for compacted SSTable
         let run_number = {
@@ -624,26 +659,27 @@ impl LsmTree {
             current
         };
 
-        let sstables_for_compact = self.sstables.read().unwrap().clone();
-        let result = self.compactor.compact(job, &sstables_for_compact, &self.active_dir, run_number)?;
-        
-        // Update SSTable list
+        let result = self.compactor.compact(job, &all_sstables, &self.active_dir, run_number)?;
+
+        // Clear all levels and add the single compacted SSTable
         {
-            let mut sstables = self.sstables.write().unwrap();
-            
-            // Clear all old SSTables
-            for sstable in sstables.drain(..) {
-                if let Err(e) = sstable.delete_files() {
-                    eprintln!("Failed to delete old SSTable: {}", e);
+            let mut levels = self.levels.write().unwrap();
+
+            // Clear all old SSTables from all levels
+            for level in levels.iter_mut() {
+                for sstable in level.drain(..) {
+                    if let Err(e) = sstable.delete_files() {
+                        eprintln!("Failed to delete old SSTable: {}", e);
+                    }
                 }
             }
-            
-            // Add the single compacted SSTable
+
+            // Add the single compacted SSTable to max level
             if let Some(output) = result.output {
-                sstables.push(output);
+                levels[self.max_level as usize].push(output);
             }
         }
-        
+
         Ok(())
     }
     
@@ -662,13 +698,13 @@ impl LsmTree {
     pub fn snapshot(&self) -> LsmSnapshot {
         let memtable = self.memtable.read().unwrap();
         let immutables = self.immutable_memtables.read().unwrap();
-        let sstables = self.sstables.read().unwrap();
+        let levels = self.levels.read().unwrap();
         let seq = *self.sequence_number.read().unwrap();
-        
+
         LsmSnapshot {
             memtable: Arc::new((*memtable).clone()),
             immutable_memtables: immutables.clone(),
-            sstables: sstables.clone(),
+            levels: levels.clone(),
             sequence_number: seq,
         }
     }
@@ -685,7 +721,7 @@ impl LsmTree {
         // Replace state
         *self.memtable.write().unwrap() = (*snapshot.memtable).clone();
         *self.immutable_memtables.write().unwrap() = snapshot.immutable_memtables;
-        *self.sstables.write().unwrap() = snapshot.sstables;
+        *self.levels.write().unwrap() = snapshot.levels;
         *self.sequence_number.write().unwrap() = snapshot.sequence_number;
 
         Ok(())
@@ -694,11 +730,13 @@ impl LsmTree {
     pub fn disk_usage(&self) -> Result<u64> {
         let mut total = 0u64;
 
-        // Count SSTable sizes
-        let sstables = self.sstables.read().unwrap();
-        for sstable in sstables.iter() {
-            if let Ok(metadata) = std::fs::metadata(sstable.path()) {
-                total += metadata.len();
+        // Count SSTable sizes from all levels
+        let levels = self.levels.read().unwrap();
+        for level in levels.iter() {
+            for sstable in level.iter() {
+                if let Ok(metadata) = std::fs::metadata(sstable.path()) {
+                    total += metadata.len();
+                }
             }
         }
 
@@ -708,13 +746,15 @@ impl LsmTree {
     pub fn get_stats(&self) -> Result<LsmStats> {
         let memtable = self.memtable.read().unwrap();
         let immutables = self.immutable_memtables.read().unwrap();
-        let sstables = self.sstables.read().unwrap();
+        let levels = self.levels.read().unwrap();
+
+        let total_sstables: usize = levels.iter().map(|level| level.len()).sum();
 
         Ok(LsmStats {
             memtable_size_bytes: memtable.size_bytes() as u64,
             immutable_memtables_count: immutables.len(),
-            l0_sstables_count: sstables.len(),
-            total_sstables_count: sstables.len(),
+            l0_sstables_count: levels[0].len(),
+            total_sstables_count: total_sstables,
             compactions_running: 0,
             bloom_filter_false_positives: 0,
         })
@@ -728,16 +768,19 @@ impl LsmTree {
         // Flush memtable to ensure all data is persisted
         self.flush_memtable()?;
 
-        // Get current sequence number and SSTables
+        // Get current sequence number and all SSTables from all levels
         let sequence_number = *self.sequence_number.read().unwrap();
-        let sstables = self.sstables.read().unwrap();
+        let all_sstables: Vec<SsTableHandle> = {
+            let levels = self.levels.read().unwrap();
+            levels.iter().flat_map(|level| level.clone()).collect()
+        };
 
         // Create snapshot using hard-links
         PersistentSnapshot::create(
             &self.path,
             name,
             label,
-            &sstables,
+            &all_sstables,
             sequence_number,
             &self.config,
         )?;
@@ -805,7 +848,7 @@ impl Clone for RangeIter {
 pub struct LsmSnapshot {
     memtable: Arc<MemTable>,
     immutable_memtables: Vec<Arc<MemTable>>,
-    sstables: Vec<SsTableHandle>,
+    levels: Vec<Vec<SsTableHandle>>,
     sequence_number: u64,
 }
 
@@ -819,56 +862,60 @@ impl LsmSnapshot {
         if let Some(value_opt) = self.memtable.get(key) {
             return Ok(value_opt.clone());
         }
-        
+
         // Check immutable memtables
         for imm in self.immutable_memtables.iter().rev() {
             if let Some(value_opt) = imm.get(key) {
                 return Ok(value_opt.clone());
             }
         }
-        
-        // Check SSTables
-        for sstable in self.sstables.iter().rev() {
-            if key >= &sstable.min_key && key <= &sstable.max_key {
-                if let Some(value) = sstable.get(key)? {
-                    return Ok(Some(value));
+
+        // Check SSTables from all levels
+        for level in &self.levels {
+            for sstable in level.iter().rev() {
+                if key >= &sstable.min_key && key <= &sstable.max_key {
+                    if let Some(value) = sstable.get(key)? {
+                        return Ok(Some(value));
+                    }
                 }
             }
         }
-        
+
         Ok(None)
     }
     
     pub fn iter(&self) -> RangeIter {
         let mut entries: BTreeMap<Key, Option<Value>> = BTreeMap::new();
-        
-        // Collect from SSTables
-        for sstable in &self.sstables {
-            if let Ok(sstable_entries) = sstable.range(&Key::from(b""), &Key::from(&[0xFF; 256])) {
-                for (k, v) in sstable_entries {
-                    entries.entry(k).or_insert(v);
+
+        // Collect from SSTables (all levels, lowest priority)
+        for level in self.levels.iter().rev() {
+            for sstable in level {
+                if let Ok(sstable_entries) = sstable.range(&Key::from(b""), &Key::from(&[0xFF; 256])) {
+                    for (k, v) in sstable_entries {
+                        entries.entry(k).or_insert(v);
+                    }
                 }
             }
         }
-        
+
         // Collect from immutables
         for imm in &self.immutable_memtables {
             for (k, v) in imm.iter() {
                 entries.insert(k.clone(), v.clone());
             }
         }
-        
+
         // Collect from memtable (highest priority)
         for (k, v) in self.memtable.iter() {
             entries.insert(k.clone(), v.clone());
         }
-        
+
         // Filter tombstones
         let results: Vec<_> = entries
             .into_iter()
             .filter_map(|(k, v)| v.map(|val| (k, val)))
             .collect();
-        
+
         RangeIter {
             entries: results,
             index: 0,
