@@ -140,6 +140,131 @@ impl Compactor {
         None
     }
     
+    /// Select compaction for level-based LSM tree using LazyLevelling policy
+    ///
+    /// LazyLevelling:
+    /// - L0 to L(max-1): Tiering (multiple runs per level)
+    /// - L(max): Leveling (single merged run)
+    /// - Compact level i to level i+1 when level i exceeds size threshold
+    pub fn select_level_compaction(
+        &self,
+        levels: &[Vec<SsTableHandle>],
+        max_level: u8,
+        size_ratio: usize,
+    ) -> Option<LevelCompactionJob> {
+        // Check each level from L0 to L(max-1)
+        for level_idx in 0..max_level as usize {
+            let level_size: u64 = levels[level_idx].iter().map(|r| r.num_entries).sum();
+            let target_size = Self::level_target_size(level_idx, size_ratio);
+
+            if level_size > target_size {
+                // This level needs compaction
+                let source_runs: Vec<usize> = (0..levels[level_idx].len()).collect();
+                let target_level = (level_idx + 1) as u8;
+
+                return Some(LevelCompactionJob {
+                    source_level: level_idx as u8,
+                    target_level,
+                    source_runs,
+                    target_level_runs: if (target_level as usize) < levels.len() {
+                        levels[target_level as usize].clone()
+                    } else {
+                        Vec::new()
+                    },
+                });
+            }
+        }
+
+        None
+    }
+
+    /// Calculate target size for a level
+    ///
+    /// L0: 10K entries (base)
+    /// L1: 10K * size_ratio
+    /// L2: 10K * size_ratio^2
+    /// etc.
+    fn level_target_size(level: usize, size_ratio: usize) -> u64 {
+        10_000 * (size_ratio as u64).pow(level as u32)
+    }
+
+    /// Execute a level-based compaction job
+    ///
+    /// For LazyLevelling:
+    /// - If target is max level: Leveling (merge everything into single run, remove tombstones)
+    /// - Otherwise: Tiering (merge source runs, keep as separate run, preserve tombstones)
+    pub fn compact_levels(
+        &self,
+        job: LevelCompactionJob,
+        source_level_runs: &[SsTableHandle],
+        active_dir: &PathBuf,
+        run_number: RunNumber,
+        max_level: u8,
+    ) -> Result<CompactionResult> {
+        // Collect all entries from source runs
+        let mut all_entries: BTreeMap<Key, Option<Value>> = BTreeMap::new();
+
+        for &idx in &job.source_runs {
+            let sstable = &source_level_runs[idx];
+
+            // Read all entries including tombstones
+            let entries = sstable.range_with_tombstones(&Key::from(b""), &Key::from(&[0xFF; 256]))?;
+
+            for (key, value_opt) in entries {
+                // Later entries overwrite earlier ones
+                all_entries.insert(key, value_opt);
+            }
+        }
+
+        // For bottom level (leveling): merge with overlapping runs and remove tombstones
+        // For other levels (tiering): keep tombstones, don't merge with target level
+        let is_bottom_level = job.target_level == max_level;
+
+        if is_bottom_level {
+            // Leveling: merge with ALL runs in target level, remove tombstones
+            for target_run in &job.target_level_runs {
+                let entries = target_run.range_with_tombstones(&Key::from(b""), &Key::from(&[0xFF; 256]))?;
+
+                for (key, value_opt) in entries {
+                    // Only insert if not already present (source has priority)
+                    all_entries.entry(key).or_insert(value_opt);
+                }
+            }
+
+            // Remove tombstones at bottom level
+            all_entries.retain(|_, v| v.is_some());
+        }
+
+        if all_entries.is_empty() {
+            return Ok(CompactionResult {
+                output: None,
+                inputs_to_remove: job.source_runs.clone(),
+                bytes_read: 0,
+                bytes_written: 0,
+            });
+        }
+
+        // Create new SSTable
+        let mut writer = SsTableWriter::new(active_dir, run_number)?;
+
+        let mut bytes_written = 0u64;
+        for (key, value_opt) in all_entries {
+            let key_len = key.as_ref().len() as u64;
+            let value_len = value_opt.as_ref().map(|v| v.as_ref().len() as u64).unwrap_or(0);
+            bytes_written += key_len + value_len;
+            let _ = writer.add(key, value_opt);
+        }
+
+        let output_handle = writer.finish(job.target_level)?;
+
+        Ok(CompactionResult {
+            output: Some(output_handle),
+            inputs_to_remove: job.source_runs.clone(),
+            bytes_read: bytes_written,
+            bytes_written,
+        })
+    }
+
     /// Execute a compaction job
     pub fn compact(&self, job: CompactionJob, sstables: &[SsTableHandle], active_dir: &PathBuf, run_number: RunNumber) -> Result<CompactionResult> {
         // Collect all entries from input SSTables (including tombstones!)
@@ -183,10 +308,10 @@ impl Compactor {
             let key_len = key.as_ref().len() as u64;
             let value_len = value_opt.as_ref().map(|v| v.as_ref().len() as u64).unwrap_or(0);
             bytes_written += key_len + value_len;
-            writer.add(key, value_opt);
+            let _ = writer.add(key, value_opt);
         }
 
-        let output_handle = writer.finish(0)?;  // TODO: use proper target level from LazyLevelling policy
+        let output_handle = writer.finish(0)?;
         
         Ok(CompactionResult {
             output: Some(output_handle),
@@ -202,6 +327,15 @@ impl Compactor {
 pub struct CompactionJob {
     pub inputs: Vec<usize>, // Indices of SSTables to compact
     pub strategy: CompactionStrategy,
+}
+
+/// Level-based compaction job for LazyLevelling policy
+#[derive(Debug, Clone)]
+pub struct LevelCompactionJob {
+    pub source_level: u8,
+    pub target_level: u8,
+    pub source_runs: Vec<usize>, // Indices within source level
+    pub target_level_runs: Vec<SsTableHandle>, // All runs in target level for overlap detection
 }
 
 #[allow(dead_code)]

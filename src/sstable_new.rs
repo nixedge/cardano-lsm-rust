@@ -230,7 +230,7 @@ impl SsTableWriter {
 /// Uses reference counting to support hard-links: multiple handles
 /// can reference the same physical files (via hard-links), and files
 /// are only deleted when the last reference is dropped.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SsTableHandle {
     paths: RunPaths,
     pub min_key: Key,
@@ -469,7 +469,7 @@ impl Drop for SsTableHandle {
 }
 
 /// Simple bloom filter implementation
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct BloomFilter {
     bits: Vec<u8>,
     num_bits: usize,  // Total number of bits (not bytes!)
@@ -519,7 +519,7 @@ impl BloomFilter {
 }
 
 /// Simple index structure
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct Index {
     keys: Vec<Vec<u8>>,
 }
