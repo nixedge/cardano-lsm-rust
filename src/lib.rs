@@ -11,6 +11,7 @@ mod sstable_new;  // New Haskell-format SSTable (will replace sstable.rs)
 mod compaction;
 mod merkle;
 mod monoidal;
+mod io_backend;  // I/O backend abstraction (sync vs io_uring)
 
 use std::path::{Path, PathBuf};
 use std::collections::BTreeMap;
@@ -20,6 +21,7 @@ use sstable_new::{SsTableWriter, SsTableHandle, RunNumber};
 use compaction::Compactor;
 use atomic_file::fsync_directory;
 use session_lock::SessionLock;
+use io_backend::IoBackend;
 
 // Re-export public types
 pub use merkle::{IncrementalMerkleTree, MerkleProof, MerkleRoot, MerkleLeaf, Direction, Hash, MerkleDiff, MerkleSnapshot};
@@ -112,6 +114,10 @@ pub struct LsmConfig {
     pub sstable_block_size: usize,
     pub enable_compression: bool,
     pub compression_algorithm: CompressionAlgorithm,
+
+    // I/O backend (sync vs io_uring)
+    #[serde(skip)]  // Don't serialize backend config
+    pub io_backend: IoBackend,
 }
 
 impl Default for LsmConfig {
@@ -146,6 +152,8 @@ impl Default for LsmConfig {
             sstable_block_size: 4096,
             enable_compression: true,
             compression_algorithm: CompressionAlgorithm::Lz4,
+
+            io_backend: IoBackend::default(),  // Default to sync I/O
         }
     }
 }

@@ -10,16 +10,17 @@
 // This matches the Haskell implementation's multi-file format,
 // with external checksums for corruption detection.
 
-use std::fs::File;
-use std::io::{self, Write};
+use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use serde::{Serialize, Deserialize};
+use byteorder::{LittleEndian, ReadBytesExt};
 
-use crate::checksum::{CRC32C, ChecksumsFile};
+use crate::checksum::ChecksumsFile;
 use crate::checksum_handle::ChecksumHandle;
-use crate::atomic_file::{AtomicFileWriter, fsync_directory};
+use crate::atomic_file::fsync_directory;
+use crate::io_backend::{self, IoBackend};
 use crate::{Key, Value, Result, Error};
 
 /// Run number for identifying a set of SSTable files
@@ -284,14 +285,16 @@ impl SsTableHandle {
         crate::checksum::check_crc(&paths.index, index_expected)?;
 
         // All checksums verified, now read the data
+        // Use default (sync) backend for metadata reading
+        let backend = IoBackend::default();
 
         // Read bloom filter
-        let filter_bytes = std::fs::read(&paths.filter)?;
+        let filter_bytes = io_backend::read_file(&paths.filter, &backend)?;
         let bloom_filter: BloomFilter = bincode::deserialize(&filter_bytes)
             .map_err(|e| Error::Serialization(e.to_string()))?;
 
         // Read index
-        let index_bytes = std::fs::read(&paths.index)?;
+        let index_bytes = io_backend::read_file(&paths.index, &backend)?;
         let index: Index = bincode::deserialize(&index_bytes)
             .map_err(|e| Error::Serialization(e.to_string()))?;
 
@@ -316,6 +319,11 @@ impl SsTableHandle {
     ///
     /// Returns None if the key is not found or was deleted.
     pub fn get(&self, key: &Key) -> Result<Option<Value>> {
+        self.get_backend(key, &IoBackend::default())
+    }
+
+    /// Get a value by key using specific I/O backend
+    pub fn get_backend(&self, key: &Key, backend: &IoBackend) -> Result<Option<Value>> {
         // Check bloom filter first (fast negative lookup)
         if !self.bloom_filter.might_contain(key.as_ref()) {
             return Ok(None);
@@ -323,35 +331,115 @@ impl SsTableHandle {
 
         // Binary search in index
         let key_bytes = key.as_ref();
-        let pos = match self.index.keys.binary_search_by(|k| k.as_slice().cmp(key_bytes)) {
+        let _pos = match self.index.keys.binary_search_by(|k| k.as_slice().cmp(key_bytes)) {
             Ok(pos) => pos,
             Err(_) => return Ok(None), // Not found
         };
 
-        // Read from keyops file
-        // TODO: Implement efficient keyops reading with proper parsing
-        // For now, return None as placeholder
-        Ok(None)
+        // For now, do a full scan - in a real implementation we'd use the index
+        // to jump to the right offset in the keyops file
+        let range_results = self.range_with_tombstones_backend(key, key, backend)?;
+
+        if let Some((_, value_opt)) = range_results.first() {
+            Ok(value_opt.clone())
+        } else {
+            Ok(None)
+        }
     }
 
     /// Range query - iterate over keys in range [from, to]
     ///
-    /// Returns an iterator over (Key, Option<Value>) pairs.
-    /// TODO: Implement efficient range scanning
-    pub fn range(&self, _from: &Key, _to: &Key) -> Result<Vec<(Key, Option<Value>)>> {
-        // Placeholder implementation
-        // TODO: Implement proper range scanning by reading keyops file
-        Ok(Vec::new())
+    /// Returns an iterator over (Key, Value) pairs (excludes tombstones).
+    pub fn range(&self, from: &Key, to: &Key) -> Result<Vec<(Key, Option<Value>)>> {
+        self.range_backend(from, to, &IoBackend::default())
+    }
+
+    /// Range query using specific I/O backend
+    pub fn range_backend(&self, from: &Key, to: &Key, backend: &IoBackend) -> Result<Vec<(Key, Option<Value>)>> {
+        let all_entries = self.range_with_tombstones_backend(from, to, backend)?;
+
+        // Filter out tombstones (None values that represent deletes)
+        // But keep None values that come from Insert operations
+        // Actually, for range queries, we want to exclude deleted keys entirely
+        Ok(all_entries.into_iter().filter(|(_, v)| v.is_some()).collect())
     }
 
     /// Range query with tombstones - needed for compaction
     ///
     /// Returns all entries including deletes (tombstones represented as None).
-    /// TODO: Implement efficient range scanning with tombstones
-    pub fn range_with_tombstones(&self, _from: &Key, _to: &Key) -> Result<Vec<(Key, Option<Value>)>> {
-        // Placeholder implementation
-        // TODO: Implement proper range scanning by reading keyops file
-        Ok(Vec::new())
+    pub fn range_with_tombstones(&self, from: &Key, to: &Key) -> Result<Vec<(Key, Option<Value>)>> {
+        self.range_with_tombstones_backend(from, to, &IoBackend::default())
+    }
+
+    /// Range query with tombstones using specific I/O backend
+    ///
+    /// This allows using io_uring for async I/O on Linux.
+    pub fn range_with_tombstones_backend(&self, from: &Key, to: &Key, backend: &IoBackend) -> Result<Vec<(Key, Option<Value>)>> {
+        // Read the entire keyops file
+        let keyops_data = io_backend::read_file(&self.paths.keyops, backend)?;
+        let mut cursor = std::io::Cursor::new(&keyops_data);
+
+        let mut results = Vec::new();
+        let mut blob_requests = Vec::new(); // For batched reads with io_uring
+
+        // Parse keyops file entry by entry
+        while cursor.position() < keyops_data.len() as u64 {
+            // Read key length
+            let key_len = match cursor.read_u32::<LittleEndian>() {
+                Ok(len) => len as usize,
+                Err(_) => break, // End of file
+            };
+
+            // Read key
+            let mut key_bytes = vec![0u8; key_len];
+            cursor.read_exact(&mut key_bytes)?;
+            let key = Key::from(&key_bytes);
+
+            // Check if key is in range
+            if key < *from || key > *to {
+                // Skip this entry
+                let op = cursor.read_u8()?;
+                if op == 1 {
+                    // Skip blob offset and length
+                    cursor.read_u64::<LittleEndian>()?;
+                    cursor.read_u64::<LittleEndian>()?;
+                }
+                continue;
+            }
+
+            // Read operation
+            let operation = cursor.read_u8()?;
+
+            if operation == 1 {
+                // Insert operation - read blob reference
+                let blob_offset = cursor.read_u64::<LittleEndian>()?;
+                let value_len = cursor.read_u64::<LittleEndian>()? as usize;
+
+                // Store blob read request for batching
+                blob_requests.push((results.len(), blob_offset, value_len));
+                results.push((key, None)); // Placeholder, will fill in value later
+            } else {
+                // Delete operation (tombstone)
+                results.push((key, None));
+            }
+        }
+
+        // Batch read all blobs using io_uring (or sequential fallback)
+        if !blob_requests.is_empty() {
+            let blob_reads: Vec<_> = blob_requests
+                .iter()
+                .map(|(_, offset, len)| (&self.paths.blobs as &Path, *offset, *len))
+                .collect();
+
+            let blob_values = io_backend::read_batch(blob_reads, backend)?;
+
+            // Fill in the blob values
+            for (i, (result_idx, _, _)) in blob_requests.iter().enumerate() {
+                results[*result_idx].1 = Some(Value::from(&blob_values[i]));
+            }
+        }
+
+        Ok(results)
     }
 
     pub fn path(&self) -> &Path {

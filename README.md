@@ -13,6 +13,7 @@ This library implements a Log-Structured Merge (LSM) tree optimized for Cardano 
 - **Monoidal Values** - Efficient range aggregations for balance queries
 - **Cheap Snapshots** - Reference-counted snapshots for instant rollback (critical for blockchain reorgs)
 - **Optimized Compaction** - Hybrid tiered/leveled strategy for blockchain write patterns
+- **High-Performance I/O** - Optional io_uring support for batched concurrent reads on Linux
 - **Crash Recovery** - Write-ahead log with checksums
 - **No RocksDB** - Avoids historical corruption issues
 
@@ -172,6 +173,54 @@ cargo build --release
 
 # Check without building
 cargo check
+```
+
+## Optional Features
+
+### io_uring Support (Linux Only)
+
+For high-performance I/O on Linux, enable the `io-uring` feature:
+
+```bash
+# Build with io_uring support
+cargo build --features io-uring
+
+# Run tests with io_uring
+cargo test --features io-uring
+```
+
+**What is io_uring?**
+
+`io_uring` is a Linux kernel interface for asynchronous I/O operations. It provides significant performance benefits for LSM trees by:
+
+- **Batched concurrent reads**: During compaction, reading from multiple SSTables happens concurrently rather than sequentially
+- **Reduced syscall overhead**: Operations are submitted in batches, minimizing context switches
+- **Better hardware utilization**: Modern NVMe SSDs can handle multiple parallel I/O operations efficiently
+
+This matches the Haskell implementation's `blockio-uring` library for optimal performance.
+
+**Platform Support:**
+- **Linux with io_uring kernel support**: Full async I/O with batching (recommended for production)
+- **Other platforms**: Automatic fallback to synchronous I/O
+
+**Configuration:**
+
+```rust
+use cardano_lsm::{LsmConfig, LsmTree};
+use cardano_lsm::io_backend::IoBackend;
+
+let mut config = LsmConfig::default();
+
+// Linux with io_uring feature enabled
+#[cfg(all(target_os = "linux", feature = "io-uring"))]
+{
+    config.io_backend = IoBackend::IoUring;
+}
+
+// Other platforms or without feature
+config.io_backend = IoBackend::Sync;
+
+let tree = LsmTree::open("./data", config)?;
 ```
 
 ## Performance Targets

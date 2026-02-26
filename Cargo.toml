@@ -51,8 +51,17 @@ uuid = { version = "1.6", features = ["v4"] }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# io_uring support (Linux only)
+[target.'cfg(target_os = "linux")'.dependencies]
+tokio-uring = { version = "0.4", optional = true }
+
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["fileapi", "handleapi", "minwinbase", "processthreadsapi", "winnt"] }
+
+[features]
+# Enable io_uring for async I/O on Linux (matches Haskell blockio-uring)
+io-uring = ["tokio-uring"]
+default = []
 
 [dev-dependencies]
 # Testing
