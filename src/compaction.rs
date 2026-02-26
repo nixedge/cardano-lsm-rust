@@ -2,7 +2,7 @@
 // Implements Tiered, Leveled, and Hybrid compaction
 
 use crate::{Key, Value, Result};
-use crate::sstable::{SsTableHandle, SsTableWriter};
+use crate::sstable_new::{SsTableHandle, SsTableWriter, RunNumber};
 use std::path::PathBuf;
 use std::collections::BTreeMap;
 
@@ -140,30 +140,30 @@ impl Compactor {
     }
     
     /// Execute a compaction job
-    pub fn compact(&self, job: CompactionJob, sstables: &[SsTableHandle]) -> Result<CompactionResult> {
+    pub fn compact(&self, job: CompactionJob, sstables: &[SsTableHandle], active_dir: &PathBuf, run_number: RunNumber) -> Result<CompactionResult> {
         // Collect all entries from input SSTables (including tombstones!)
         let mut all_entries: BTreeMap<Key, Option<Value>> = BTreeMap::new();
-        
+
         for &idx in &job.inputs {
             let sstable = &sstables[idx];
-            
+
             // Read all entries from this SSTable INCLUDING tombstones
             let entries = sstable.range_with_tombstones(&Key::from(b""), &Key::from(&[0xFF; 256]))?;
-            
+
             for (key, value_opt) in entries {
                 // Later entries overwrite earlier ones (including tombstones)
                 all_entries.insert(key, value_opt);
             }
         }
-        
+
         // Only remove tombstones if we're compacting ALL SSTables
         // Otherwise, tombstones need to persist to shadow older tables
         let compacting_all = job.inputs.len() == sstables.len();
-        
+
         if compacting_all {
             all_entries.retain(|_, v| v.is_some());
         }
-        
+
         if all_entries.is_empty() {
             // All entries were tombstones, just delete the input SSTables
             return Ok(CompactionResult {
@@ -173,18 +173,9 @@ impl Compactor {
                 bytes_written: 0,
             });
         }
-        
-        // Create new SSTable with merged data
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis();
-        
-        let output_path = self.base_path
-            .join("sstables")
-            .join(format!("compacted_{:016x}.sst", timestamp));
-        
-        let mut writer = SsTableWriter::new(output_path)?;
+
+        // Create new SSTable with merged data using new format
+        let mut writer = SsTableWriter::new(active_dir, run_number)?;
         
         let mut bytes_written = 0u64;
         for (key, value_opt) in all_entries {
