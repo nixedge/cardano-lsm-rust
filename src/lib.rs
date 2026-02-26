@@ -572,27 +572,27 @@ impl LsmTree {
         Ok(())
     }
     
+    /// Trigger compaction using LazyLevelling policy
+    ///
+    /// LazyLevelling:
+    /// - L0 to L(max-1): Tiering (multiple runs per level)
+    /// - L(max): Leveling (single merged run, tombstone removal)
+    /// - Compact level i to level i+1 when level i exceeds size threshold
     pub fn compact(&mut self) -> Result<()> {
-        // TODO: Implement LazyLevelling compaction policy
-        // For now, collect all L0 SSTables into a flat list and compact them
+        let levels_snapshot = self.levels.read().unwrap().clone();
 
-        let all_sstables = {
-            let levels = self.levels.read().unwrap();
-            levels[0].clone()  // Only compact L0 for now
-        };
-
-        if all_sstables.is_empty() {
-            return Ok(());
-        }
-
-        // Select tables to compact
-        let job = match self.compactor.select_compaction(&all_sstables) {
+        // Select level for compaction using LazyLevelling policy
+        // Size ratio of 4 is standard for LSM trees
+        let job = match self.compactor.select_level_compaction(&levels_snapshot, self.max_level, 4) {
             Some(job) => job,
             None => {
                 // Nothing to compact
                 return Ok(());
             }
         };
+
+        let source_level = job.source_level as usize;
+        let target_level = job.target_level as usize;
 
         // Get next run number for compacted SSTable
         let run_number = {
@@ -603,19 +603,26 @@ impl LsmTree {
         };
 
         // Execute compaction
-        let result = self.compactor.compact(job, &all_sstables, &self.active_dir, run_number)?;
+        let source_runs = levels_snapshot[source_level].clone();
+        let result = self.compactor.compact_levels(
+            job,
+            &source_runs,
+            &self.active_dir,
+            run_number,
+            self.max_level,
+        )?;
 
-        // Update level 0
+        // Update levels atomically
         {
             let mut levels = self.levels.write().unwrap();
 
-            // Remove input SSTables (in reverse order to maintain indices)
+            // Remove source runs (in reverse order to maintain indices)
             let mut to_remove = result.inputs_to_remove.clone();
             to_remove.sort_by(|a, b| b.cmp(a)); // Sort descending
 
             for idx in to_remove {
-                if idx < levels[0].len() {
-                    let removed = levels[0].remove(idx);
+                if idx < levels[source_level].len() {
+                    let removed = levels[source_level].remove(idx);
                     // Delete all files for this SSTable run
                     if let Err(e) = removed.delete_files() {
                         eprintln!("Failed to delete old SSTable: {}", e);
@@ -623,9 +630,21 @@ impl LsmTree {
                 }
             }
 
-            // Add output SSTable back to L0 for now
+            // Add output SSTable to target level
             if let Some(output) = result.output {
-                levels[0].push(output);
+                // For bottom level (leveling): replace all runs with merged run
+                if target_level == self.max_level as usize {
+                    // Clear target level and add single merged run
+                    for old_run in levels[target_level].drain(..) {
+                        if let Err(e) = old_run.delete_files() {
+                            eprintln!("Failed to delete old SSTable: {}", e);
+                        }
+                    }
+                    levels[target_level].push(output);
+                } else {
+                    // For other levels (tiering): just add the new run
+                    levels[target_level].push(output);
+                }
             }
         }
 
