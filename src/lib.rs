@@ -528,7 +528,7 @@ impl LsmTree {
             writer.add(key.clone(), value_opt.clone())?;
         }
 
-        let handle = writer.finish()?;
+        let handle = writer.finish(0)?;  // Flushes always go to L0
 
         // Add to SSTable list
         {

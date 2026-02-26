@@ -215,11 +215,11 @@ mod tests {
         // Create some SSTables
         let mut writer1 = SsTableWriter::new(&active_dir, 1)?;
         writer1.add(Key::from(b"key1"), Some(Value::from(b"value1")))?;
-        let handle1 = writer1.finish()?;
+        let handle1 = writer1.finish(0)?;
 
         let mut writer2 = SsTableWriter::new(&active_dir, 2)?;
         writer2.add(Key::from(b"key2"), Some(Value::from(b"value2")))?;
-        let handle2 = writer2.finish()?;
+        let handle2 = writer2.finish(0)?;
 
         let sstables = vec![handle1, handle2];
         let config = LsmConfig::default();
@@ -264,7 +264,7 @@ mod tests {
         // Create some snapshots
         let mut writer = SsTableWriter::new(&active_dir, 1)?;
         writer.add(Key::from(b"key1"), Some(Value::from(b"value1")))?;
-        let handle = writer.finish()?;
+        let handle = writer.finish(0)?;
 
         let sstables = vec![handle];
         let config = LsmConfig::default();
@@ -290,7 +290,7 @@ mod tests {
         // Create SSTable
         let mut writer = SsTableWriter::new(&active_dir, 1)?;
         writer.add(Key::from(b"key1"), Some(Value::from(b"value1")))?;
-        let handle = writer.finish()?;
+        let handle = writer.finish(0)?;
 
         let sstables = vec![handle];
         let config = LsmConfig::default();
