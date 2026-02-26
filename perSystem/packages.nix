@@ -6,59 +6,11 @@
     pkgs,
     ...
   }: let
-    # Use haskell.nix for IOG Haskell projects
-    haskellNixPkgs = import inputs.haskellNix {
-      inherit system;
-      inherit (pkgs) config;
-      overlays = [
-        # CHaP overlay for Cardano packages
-        (_: _: {
-          CHaP = inputs.CHaP;
-        })
-      ];
-    };
+    # Build conformance generator standalone (without lsm-tree for now)
+    # Uses reference model until we integrate haskell.nix properly
+    haskellPackages = pkgs.haskellPackages;
     
-    # Build lsm-tree and conformance-generator with haskell.nix
-    # This handles the broken dependencies properly
-    project = haskellNixPkgs.haskell-nix.cabalProject' {
-      src = inputs.lsm-tree-haskell;
-      compiler-nix-name = "ghc98";
-      
-      # Add CHaP as a package source
-      inputMap = {
-        "https://chap.intersectmbo.org/" = inputs.CHaP;
-      };
-      
-      modules = [{
-        # Allow building packages marked as broken
-        packages = {
-          quickcheck-state-machine.doHaddock = false;
-          quickcheck-state-machine.flags = {};
-        };
-      }];
-    };
-    
-    # Build our conformance generator separately
-    conformanceProject = haskellNixPkgs.haskell-nix.cabalProject' {
-      src = ../conformance-generator;
-      compiler-nix-name = "ghc98";
-      
-      inputMap = {
-        "https://chap.intersectmbo.org/" = inputs.CHaP;
-      };
-      
-      # Make lsm-tree available from the other project
-      modules = [{
-        packages = {
-          conformance-generator = {
-            components.exes.conformance-generator = {
-              # Link against lsm-tree from the project
-            };
-          };
-        };
-      }];
-    };
-    
+    conformance-gen = haskellPackages.callCabal2nix "conformance-generator" ../conformance-generator {};
   in {
     packages = {
       default = config.packages.cardano-lsm;
@@ -94,11 +46,9 @@
           };
         };
       
-      # Haskell lsm-tree library (built with haskell.nix)
-      lsm-tree-haskell = project.hsPkgs.lsm-tree.components.library;
-      
-      # Conformance test generator
-      conformance-generator = conformanceProject.hsPkgs.conformance-generator.components.exes.conformance-generator;
+      # Conformance test generator (uses reference model for now)
+      # TODO: Integrate with haskell.nix to use real lsm-tree
+      conformance-generator = conformance-gen;
     };
   };
 }

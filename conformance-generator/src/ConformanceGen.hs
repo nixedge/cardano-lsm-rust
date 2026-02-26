@@ -28,6 +28,7 @@ module ConformanceGen
 
 import Data.Aeson (ToJSON, FromJSON, encode, object, (.=))
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Types as Aeson (Parser)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
@@ -37,6 +38,7 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import Data.Word (Word8)
 import GHC.Generics (Generic)
 import Test.QuickCheck
 import System.Random (mkStdGen, setStdGen)
@@ -95,6 +97,37 @@ instance ToJSON Operation where
   toJSON Compact = object
     [ "type" .= ("Compact" :: Text)
     ]
+
+instance FromJSON Operation where
+  parseJSON = Aeson.withObject "Operation" $ \v -> do
+    opType <- v Aeson..: "type" :: Aeson.Parser Text
+    case opType of
+      "Insert" -> do
+        keyB64 <- v Aeson..: "key"
+        valueB64 <- v Aeson..: "value"
+        case (decodeB64 keyB64, decodeB64 valueB64) of
+          (Right k, Right val) -> return $ Insert k val
+          _ -> fail "Invalid base64 in Insert"
+      "Get" -> do
+        keyB64 <- v Aeson..: "key"
+        case decodeB64 keyB64 of
+          Right k -> return $ Get k
+          _ -> fail "Invalid base64 in Get"
+      "Delete" -> do
+        keyB64 <- v Aeson..: "key"
+        case decodeB64 keyB64 of
+          Right k -> return $ Delete k
+          _ -> fail "Invalid base64 in Delete"
+      "Range" -> do
+        fromB64 <- v Aeson..: "from"
+        toB64 <- v Aeson..: "to"
+        case (decodeB64 fromB64, decodeB64 toB64) of
+          (Right f, Right t) -> return $ Range f t
+          _ -> fail "Invalid base64 in Range"
+      "Snapshot" -> Snapshot <$> v Aeson..: "id"
+      "Rollback" -> Rollback <$> v Aeson..: "snapshot_id"
+      "Compact" -> return Compact
+      _ -> fail $ "Unknown operation type: " ++ T.unpack opType
 
 -- | Results of LSM operations
 data OperationResult
@@ -250,146 +283,17 @@ generateTestCase seed numOps maxSnapshots = do
 --------------------------------------------------------------------------------
 
 {- |
-Run a test case against the Haskell lsm-tree implementation and record results.
+Run test case against actual Haskell lsm-tree (stub for now).
 
-This function:
-1. Creates a temporary LSM tree session
-2. Executes each operation in sequence
-3. Records the result of each operation
-4. Returns all results for comparison with Rust implementation
-
-Note: The exact lsm-tree API calls may need adjustment based on the actual
-      library interface. This implementation assumes a typical LSM tree API.
+This function would use the real lsm-tree API when available.
+For now, it immediately falls back to the reference model.
 -}
-runAndRecord :: TestCase -> IO TestResults
-runAndRecord TestCase{..} = do
+runWithLSMTree :: TestCase -> IO TestResults
+runWithLSMTree TestCase{..} = 
   withSystemTempDirectory "lsm-conformance" $ \tmpDir -> do
-    createDirectoryIfMissing True tmpDir
-    
-    -- Note: The lsm-tree API specifics may vary
-    -- This implementation attempts to use the most common patterns
-    -- Adjust based on actual lsm-tree module exports
-    
-    result <- try @SomeException $ do
-      -- Run with default session (adjust config as needed)
-      LSM.withSession LSM.defaultSession tmpDir $ \session -> do
-        -- Create table with default config
-        LSM.withTable session LSM.defaultTableConfig $ \table -> do
-          -- Execute operations
-          execResults <- executeOperations table operations
-          return $ TestResults { results = execResults }
-    
-    case result of
-      Right testResults -> return testResults
-      Left err -> do
-        -- If we can't run against lsm-tree, return errors for all operations
-        putStrLn $ "Warning: Could not run against lsm-tree: " ++ show err
-        putStrLn $ "Generating placeholder results"
-        return $ TestResults 
-          { results = replicate (length operations) (Err "LSM tree API not available")
-          }
-
--- | Execute a sequence of operations and collect results
-executeOperations 
-  :: LSM.Table IO ByteString ByteString ByteString
-  -> [Operation]
-  -> IO [OperationResult]
-executeOperations table ops = do
-  -- State: map of snapshot IDs to table snapshots
-  (_, results) <- foldM execOne (Map.empty, []) ops
-  return $ reverse results
-  where
-    execOne (snapshots, acc) op = do
-      result <- executeOperation table snapshots op
-      let newSnapshots = updateSnapshotMap snapshots op table
-      return (newSnapshots, result : acc)
-
--- | Execute a single operation
-executeOperation
-  :: LSM.Table IO ByteString ByteString ByteString
-  -> Map String (LSM.Table IO ByteString ByteString ByteString)
-  -> Operation
-  -> IO OperationResult
-executeOperation table snapshots op = 
-  catch (doExecute table snapshots op) handleError
-  where
-    handleError :: SomeException -> IO OperationResult
-    handleError e = return $ Err (T.pack $ "Operation failed: " ++ show e)
-
--- | Actually execute the operation
-doExecute
-  :: LSM.Table IO ByteString ByteString ByteString
-  -> Map String (LSM.Table IO ByteString ByteString ByteString)
-  -> Operation
-  -> IO OperationResult
-
-doExecute table _ (Insert k v) = do
-  LSM.insert table k v
-  return OkUnit
-
-doExecute table _ (Get k) = do
-  maybeValue <- LSM.lookup table k
-  return $ case maybeValue of
-    Just v  -> Ok (Just (encodeB64 v))
-    Nothing -> Ok Nothing
-
-doExecute table _ (Delete k) = do
-  LSM.delete table k
-  return OkUnit
-
-doExecute table _ (Range from to) = do
-  -- The exact API for range queries may vary
-  -- Common patterns in LSM libraries:
-  -- - LSM.rangeLookup table from to
-  -- - LSM.range table (Just from) (Just to)
-  -- - Using cursors
-  
-  -- Attempt 1: Direct range lookup (if available)
-  -- entries <- LSM.rangeLookup table from to
-  
-  -- Attempt 2: Use lookups (fallback)
-  -- For conformance, we'll use a simple reference implementation
-  -- that matches LSM semantics
-  
-  -- TODO: Replace with actual lsm-tree range API when determined
-  -- For now, return empty range as placeholder
-  return $ OkRange []
-
-doExecute table snapshots (Snapshot sid) = do
-  -- Snapshots in lsm-tree might be handled via:
-  -- 1. Table duplication
-  -- 2. Snapshot API (if available)
-  -- 3. Cursor-based isolation
-  
-  -- For now, return success
-  -- In real implementation, would need to store table state
-  return OkUnit
-
-doExecute table snapshots (Rollback sid) = do
-  -- Rollback would require restoring from snapshot
-  -- This depends on how lsm-tree handles snapshots
-  
-  -- For now, return success
-  return OkUnit
-
-doExecute table _ Compact = do
-  -- Trigger manual compaction if API supports it
-  -- LSM trees often have: compact, merge, or similar operations
-  
-  -- If no explicit compact operation, return success
-  -- (compaction happens automatically in background)
-  return OkUnit
-
--- | Update snapshot map based on operation
-updateSnapshotMap
-  :: Map String (LSM.Table IO ByteString ByteString ByteString)
-  -> Operation
-  -> LSM.Table IO ByteString ByteString ByteString
-  -> Map String (LSM.Table IO ByteString ByteString ByteString)
-updateSnapshotMap snaps (Snapshot sid) table = 
-  -- In real implementation, would duplicate table or create snapshot
-  snaps
-updateSnapshotMap snaps _ _ = snaps
+    -- This is where we'd use the real lsm-tree API
+    -- For now, fall back to reference
+    runAndRecordReference $ TestCase { version, seed, config, operations }
 
 --------------------------------------------------------------------------------
 -- Helper Functions
@@ -416,42 +320,47 @@ This ensures we generate valid test cases that work with basic LSM semantics.
 -}
 
 type RefModel = Map ByteString (Maybe ByteString)
+type Snapshots = Map String RefModel
 
 -- | Run against reference model (pure, simple semantics)
 runReferenceModel :: [Operation] -> [OperationResult]
 runReferenceModel ops = 
-  let (_, results) = foldl execOp (Map.empty, []) ops
+  let (_, _, results) = foldl execOp (Map.empty, Map.empty, []) ops
   in reverse results
   where
-    execOp (model, acc) (Insert k v) = 
-      (Map.insert k (Just v) model, OkUnit : acc)
+    execOp (model, snapshots, acc) (Insert k v) = 
+      (Map.insert k (Just v) model, snapshots, OkUnit : acc)
     
-    execOp (model, acc) (Get k) =
+    execOp (model, snapshots, acc) (Get k) =
       let result = case Map.lookup k model of
             Just (Just v) -> Ok (Just (encodeB64 v))
             _ -> Ok Nothing
-      in (model, result : acc)
+      in (model, snapshots, result : acc)
     
-    execOp (model, acc) (Delete k) =
-      (Map.insert k Nothing model, OkUnit : acc)
+    execOp (model, snapshots, acc) (Delete k) =
+      (Map.insert k Nothing model, snapshots, OkUnit : acc)
     
-    execOp (model, acc) (Range from to) =
+    execOp (model, snapshots, acc) (Range from to) =
       let entries = [(k, v) | (k, Just v) <- Map.toList model, k >= from, k <= to]
           pairs = map (\(k, v) -> (encodeB64 k, encodeB64 v)) entries
-      in (model, OkRange pairs : acc)
+      in (model, snapshots, OkRange pairs : acc)
     
-    execOp (model, acc) (Snapshot _) =
-      (model, OkUnit : acc)
+    execOp (model, snapshots, acc) (Snapshot sid) =
+      -- Store snapshot
+      let newSnapshots = Map.insert sid model snapshots
+      in (model, newSnapshots, OkUnit : acc)
     
-    execOp (model, acc) (Rollback _) =
-      -- Simplified: rollback not fully modeled
-      (model, OkUnit : acc)
+    execOp (model, snapshots, acc) (Rollback sid) =
+      -- Restore from snapshot
+      case Map.lookup sid snapshots of
+        Just savedModel -> (savedModel, snapshots, OkUnit : acc)
+        Nothing -> (model, snapshots, Err "Snapshot not found" : acc)
     
-    execOp (model, acc) Compact =
+    execOp (model, snapshots, acc) Compact =
       -- Compact: remove tombstones
       let compacted = Map.filter (\v -> case v of Just _ -> True; Nothing -> False) model
           compacted' = Map.map (\(Just v) -> Just v) compacted
-      in (compacted', OkUnit : acc)
+      in (compacted', snapshots, OkUnit : acc)
 
 {- |
 Fallback implementation using reference model.
@@ -484,21 +393,6 @@ runAndRecord testCase = do
       putStrLn $ "⚠️  lsm-tree API not available: " ++ show err
       putStrLn "   Falling back to reference model"
       runAndRecordReference testCase
-
--- | Run test case against actual Haskell lsm-tree
-runWithLSMTree :: TestCase -> IO TestResults
-runWithLSMTree TestCase{..} = 
-  withSystemTempDirectory "lsm-conformance" $ \tmpDir -> do
-    -- This is where we'd use the real lsm-tree API
-    -- The exact invocation depends on the library's session management
-    
-    -- Typical pattern would be:
-    -- LSM.withSession config tmpDir $ \session ->
-    --   LSM.withTable session tableConfig $ \table ->
-    --     executeOperations table operations
-    
-    -- For now, fall back to reference
-    runAndRecordReference $ TestCase { version, seed, config, operations }
 
 --------------------------------------------------------------------------------
 -- Statistics and Utilities
