@@ -472,6 +472,7 @@ impl Drop for SsTableHandle {
 #[derive(Clone, Serialize, Deserialize)]
 struct BloomFilter {
     bits: Vec<u8>,
+    num_bits: usize,  // Total number of bits (not bytes!)
     num_hashes: u32,
 }
 
@@ -494,15 +495,13 @@ impl BloomFilter {
             }
         }
 
-        Self { bits, num_hashes }
+        Self { bits, num_bits, num_hashes }
     }
 
     fn might_contain(&self, key: &[u8]) -> bool {
-        let num_bits = self.bits.len() * 8;
-
         for i in 0..self.num_hashes {
             let hash = Self::hash(key, i);
-            let bit_pos = (hash as usize) % num_bits;
+            let bit_pos = (hash as usize) % self.num_bits;
             if (self.bits[bit_pos / 8] & (1 << (bit_pos % 8))) == 0 {
                 return false;
             }
