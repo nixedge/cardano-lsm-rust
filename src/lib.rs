@@ -5,6 +5,7 @@ mod atomic_file;
 mod checksum;
 mod checksum_handle;
 mod sstable;
+mod sstable_new;  // New Haskell-format SSTable (will replace sstable.rs)
 mod compaction;
 mod merkle;
 mod monoidal;
