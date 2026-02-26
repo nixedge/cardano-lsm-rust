@@ -156,6 +156,7 @@ dependencies = [
  "blake3",
  "byteorder",
  "bytes",
+ "ciborium",
  "crc32fast",
  "criterion",
  "crossbeam",
