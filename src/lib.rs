@@ -17,6 +17,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Write, Read, Seek, SeekFrom};
 use sstable::{SsTableWriter, SsTableHandle};
 use compaction::Compactor;
+use atomic_file::fsync_directory;
 
 // Re-export public types
 pub use merkle::{IncrementalMerkleTree, MerkleProof, MerkleRoot, MerkleLeaf, Direction, Hash, MerkleDiff, MerkleSnapshot};
@@ -251,21 +252,23 @@ impl MemTable {
 
 pub struct LsmTree {
     path: PathBuf,
+    active_dir: PathBuf,     // active/ - mutable SSTables
+    snapshots_dir: PathBuf,  // snapshots/ - persistent snapshots
     config: LsmConfig,
-    
+
     // In-memory components
     memtable: Arc<RwLock<MemTable>>,
     immutable_memtables: Arc<RwLock<Vec<Arc<MemTable>>>>,
-    
+
     // Sequence number for ordering
     sequence_number: Arc<RwLock<u64>>,
-    
-    // WAL
+
+    // WAL (will be removed in Phase 2)
     wal: Arc<RwLock<WriteAheadLog>>,
-    
+
     // SSTables
     sstables: Arc<RwLock<Vec<SsTableHandle>>>,
-    
+
     // Compaction
     compactor: Arc<Compactor>,
 }
@@ -273,30 +276,43 @@ pub struct LsmTree {
 impl LsmTree {
     pub fn open(path: impl AsRef<Path>, config: LsmConfig) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
+
+        // Create directory structure matching Haskell:
+        // root/
+        //   active/    - Active SSTables (mutable, being written/compacted)
+        //   snapshots/ - Persistent snapshots (immutable, hard-linked files)
         std::fs::create_dir_all(&path)?;
-        
-        // Create sstables directory
-        let sstables_dir = path.join("sstables");
-        std::fs::create_dir_all(&sstables_dir)?;
-        
-        // Open or create WAL
+
+        let active_dir = path.join("active");
+        std::fs::create_dir_all(&active_dir)?;
+
+        let snapshots_dir = path.join("snapshots");
+        std::fs::create_dir_all(&snapshots_dir)?;
+
+        // Fsync directories to ensure they're durable
+        fsync_directory(&path)?;
+        fsync_directory(&active_dir)?;
+        fsync_directory(&snapshots_dir)?;
+
+        // Open or create WAL (will be removed in Phase 2)
         let wal_path = path.join("wal.log");
         let mut wal = WriteAheadLog::open(&wal_path, config.wal_sync_mode.clone())?;
-        
+
         let mut sequence_number = 0u64;
         let mut memtable = MemTable::new(sequence_number);
-        
-        // Load existing SSTables
+
+        // Load existing SSTables from active/ directory
         let mut sstables = Vec::new();
-        if sstables_dir.exists() {
-            for entry in std::fs::read_dir(&sstables_dir)? {
-                let entry = entry?;
-                let path = entry.path();
-                if path.extension().and_then(|s| s.to_str()) == Some("sst") {
-                    match SsTableHandle::open(path) {
-                        Ok(handle) => sstables.push(handle),
-                        Err(e) => eprintln!("Failed to load SSTable: {}", e),
-                    }
+        for entry in std::fs::read_dir(&active_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            // Look for .keyops files (Haskell SSTable format)
+            // Old .sst files also supported for backward compatibility during migration
+            let ext = path.extension().and_then(|s| s.to_str());
+            if ext == Some("keyops") || ext == Some("sst") {
+                match SsTableHandle::open(path) {
+                    Ok(handle) => sstables.push(handle),
+                    Err(e) => eprintln!("Failed to load SSTable: {}", e),
                 }
             }
         }
@@ -327,6 +343,8 @@ impl LsmTree {
         }
         
         Ok(Self {
+            active_dir,
+            snapshots_dir,
             path,
             config,
             memtable: Arc::new(RwLock::new(memtable)),
