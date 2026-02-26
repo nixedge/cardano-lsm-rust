@@ -16,8 +16,6 @@ use std::path::{Path, PathBuf};
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 use serde::{Serialize, Deserialize};
-use std::fs::{File, OpenOptions};
-use std::io::{Write, Read, Seek, SeekFrom};
 use sstable_new::{SsTableWriter, SsTableHandle, RunNumber};
 use compaction::Compactor;
 use atomic_file::fsync_directory;
@@ -104,11 +102,7 @@ pub struct LsmConfig {
     // Bloom filters
     pub bloom_filter_bits_per_key: usize,
     pub bloom_filter_fp_rate: f64,
-    
-    // WAL
-    pub wal_sync_mode: WalSyncMode,
-    pub wal_max_size: usize,
-    
+
     // Snapshots
     pub max_snapshots_per_wallet: usize,
     pub snapshot_interval: std::time::Duration,
@@ -118,9 +112,6 @@ pub struct LsmConfig {
     pub sstable_block_size: usize,
     pub enable_compression: bool,
     pub compression_algorithm: CompressionAlgorithm,
-    
-    // Checksums
-    pub enable_wal_checksums: bool,
 }
 
 impl Default for LsmConfig {
@@ -147,10 +138,7 @@ impl Default for LsmConfig {
             
             bloom_filter_bits_per_key: 10,
             bloom_filter_fp_rate: 0.01,
-            
-            wal_sync_mode: WalSyncMode::Periodic(100),
-            wal_max_size: 64 * 1024 * 1024,
-            
+
             max_snapshots_per_wallet: 10,
             snapshot_interval: std::time::Duration::from_secs(600),
             
@@ -158,21 +146,12 @@ impl Default for LsmConfig {
             sstable_block_size: 4096,
             enable_compression: true,
             compression_algorithm: CompressionAlgorithm::Lz4,
-            
-            enable_wal_checksums: true,
         }
     }
 }
 
 // Re-export CompactionStrategy
 pub use compaction::CompactionStrategy;
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum WalSyncMode {
-    Always,
-    Periodic(usize),
-    None,
-}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum CompressionAlgorithm {
@@ -277,9 +256,6 @@ pub struct LsmTree {
     // Next run number for SSTable creation
     next_run_number: Arc<RwLock<RunNumber>>,
 
-    // WAL (will be removed in Phase 2)
-    wal: Arc<RwLock<WriteAheadLog>>,
-
     // SSTables
     sstables: Arc<RwLock<Vec<SsTableHandle>>>,
 
@@ -315,12 +291,9 @@ impl LsmTree {
         fsync_directory(&active_dir)?;
         fsync_directory(&snapshots_dir)?;
 
-        // Open or create WAL (will be removed in Phase 2)
-        let wal_path = path.join("wal.log");
-        let mut wal = WriteAheadLog::open(&wal_path, config.wal_sync_mode.clone())?;
-
-        let mut sequence_number = 0u64;
-        let mut memtable = MemTable::new(sequence_number);
+        // Initialize sequence number and memtable
+        let sequence_number = 0u64;
+        let memtable = MemTable::new(sequence_number);
 
         // Load existing SSTables from active/ directory
         // Discover run numbers by looking for .keyops files
@@ -360,23 +333,7 @@ impl LsmTree {
             config.compaction_strategy.clone(),
             path.clone(),
         ));
-        
-        // Replay WAL if it exists
-        if wal_path.exists() {
-            for entry in wal.replay()? {
-                sequence_number = sequence_number.max(entry.sequence_number);
-                match entry.operation {
-                    WalOperation::Insert { key, value } => {
-                        memtable.insert(key, value);
-                    }
-                    WalOperation::Delete { key } => {
-                        memtable.delete(key);
-                    }
-                }
-            }
-            sequence_number += 1;
-        }
-        
+
         Ok(Self {
             active_dir,
             snapshots_dir,
@@ -387,39 +344,27 @@ impl LsmTree {
             immutable_memtables: Arc::new(RwLock::new(Vec::new())),
             sequence_number: Arc::new(RwLock::new(sequence_number)),
             next_run_number: Arc::new(RwLock::new(next_run_number)),
-            wal: Arc::new(RwLock::new(wal)),
             sstables: Arc::new(RwLock::new(sstables)),
             compactor,
         })
     }
     
     pub fn insert(&mut self, key: &Key, value: &Value) -> Result<()> {
-        // Get next sequence number
-        let seq_num = {
-            let mut seq = self.sequence_number.write().unwrap();
-            let num = *seq;
-            *seq += 1;
-            num
-        };
-        
-        // Write to WAL first
-        {
-            let mut wal = self.wal.write().unwrap();
-            wal.append_insert(seq_num, key.clone(), value.clone())?;
-        }
-        
-        // Then write to memtable
+        // Ephemeral write - only persisted via save_snapshot()
+        // No WAL, writes lost on crash until snapshot is saved
+
+        // Write to memtable
         {
             let mut memtable = self.memtable.write().unwrap();
             memtable.insert(key.clone(), value.clone());
-            
+
             // Check if memtable is full
             if memtable.size_bytes() >= self.config.memtable_size {
                 drop(memtable); // Release lock before flush
                 self.flush_memtable()?;
             }
         }
-        
+
         Ok(())
     }
     
@@ -459,32 +404,21 @@ impl LsmTree {
     }
     
     pub fn delete(&mut self, key: &Key) -> Result<()> {
-        // Get next sequence number
-        let seq_num = {
-            let mut seq = self.sequence_number.write().unwrap();
-            let num = *seq;
-            *seq += 1;
-            num
-        };
-        
-        // Write to WAL
-        {
-            let mut wal = self.wal.write().unwrap();
-            wal.append_delete(seq_num, key.clone())?;
-        }
-        
+        // Ephemeral write - only persisted via save_snapshot()
+        // No WAL, writes lost on crash until snapshot is saved
+
         // Write tombstone to memtable
         {
             let mut memtable = self.memtable.write().unwrap();
             memtable.delete(key.clone());
-            
+
             // Check if memtable is full
             if memtable.size_bytes() >= self.config.memtable_size {
                 drop(memtable);
                 self.flush_memtable()?;
             }
         }
-        
+
         Ok(())
     }
     
@@ -561,9 +495,7 @@ impl LsmTree {
     }
     
     pub fn flush(&self) -> Result<()> {
-        // Flush WAL
-        let mut wal = self.wal.write().unwrap();
-        wal.sync()?;
+        // No-op: With ephemeral writes, flush only happens via save_snapshot()
         Ok(())
     }
     
@@ -609,13 +541,6 @@ impl LsmTree {
                 // Trigger compaction
                 self.compact()?;
             }
-        }
-
-        // Clear WAL since data is now persisted
-        {
-            let seq = old_memtable.sequence_number;
-            let mut wal = self.wal.write().unwrap();
-            wal.truncate_to(seq)?;
         }
 
         Ok(())
@@ -756,23 +681,19 @@ impl LsmTree {
                 "Cannot rollback to future snapshot".to_string()
             ));
         }
-        
+
         // Replace state
         *self.memtable.write().unwrap() = (*snapshot.memtable).clone();
         *self.immutable_memtables.write().unwrap() = snapshot.immutable_memtables;
         *self.sstables.write().unwrap() = snapshot.sstables;
         *self.sequence_number.write().unwrap() = snapshot.sequence_number;
-        
-        // Truncate WAL
-        let mut wal = self.wal.write().unwrap();
-        wal.truncate_to(snapshot.sequence_number)?;
-        
+
         Ok(())
     }
     
     pub fn disk_usage(&self) -> Result<u64> {
         let mut total = 0u64;
-        
+
         // Count SSTable sizes
         let sstables = self.sstables.read().unwrap();
         for sstable in sstables.iter() {
@@ -780,16 +701,8 @@ impl LsmTree {
                 total += metadata.len();
             }
         }
-        
-        // Add WAL size
-        total += self.wal_size()?;
-        
+
         Ok(total)
-    }
-    
-    pub fn wal_size(&self) -> Result<u64> {
-        let wal = self.wal.read().unwrap();
-        wal.size()
     }
     
     pub fn get_stats(&self) -> Result<LsmStats> {
@@ -971,174 +884,6 @@ pub struct LsmStats {
     pub total_sstables_count: usize,
     pub compactions_running: usize,
     pub bloom_filter_false_positives: u64,
-}
-
-// ===== Write-Ahead Log =====
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-enum WalOperation {
-    Insert { key: Key, value: Value },
-    Delete { key: Key },
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct WalEntry {
-    sequence_number: u64,
-    operation: WalOperation,
-    checksum: u32,
-}
-
-struct WriteAheadLog {
-    file: File,
-    sync_mode: WalSyncMode,
-    write_counter: usize,
-    current_size: u64,
-}
-
-impl WriteAheadLog {
-    fn open(path: &Path, sync_mode: WalSyncMode) -> Result<Self> {
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .append(true)
-            .open(path)?;
-        
-        let current_size = file.metadata()?.len();
-        
-        Ok(Self {
-            file,
-            sync_mode,
-            write_counter: 0,
-            current_size,
-        })
-    }
-    
-    fn append_insert(&mut self, sequence_number: u64, key: Key, value: Value) -> Result<()> {
-        let operation = WalOperation::Insert { key, value };
-        self.append_entry(sequence_number, operation)
-    }
-    
-    fn append_delete(&mut self, sequence_number: u64, key: Key) -> Result<()> {
-        let operation = WalOperation::Delete { key };
-        self.append_entry(sequence_number, operation)
-    }
-    
-    fn append_entry(&mut self, sequence_number: u64, operation: WalOperation) -> Result<()> {
-        // Serialize entry
-        let entry_bytes = bincode::serialize(&operation)?;
-        
-        // Calculate checksum
-        let checksum = crc32fast::hash(&entry_bytes);
-        
-        let entry = WalEntry {
-            sequence_number,
-            operation,
-            checksum,
-        };
-        
-        // Serialize full entry with checksum
-        let full_bytes = bincode::serialize(&entry)?;
-        
-        // Write length prefix
-        let len = full_bytes.len() as u32;
-        self.file.write_all(&len.to_le_bytes())?;
-        
-        // Write entry
-        self.file.write_all(&full_bytes)?;
-        
-        self.current_size += 4 + full_bytes.len() as u64;
-        self.write_counter += 1;
-        
-        // Sync based on mode
-        match &self.sync_mode {
-            WalSyncMode::Always => {
-                self.file.sync_all()?;
-            }
-            WalSyncMode::Periodic(n) => {
-                if self.write_counter >= *n {
-                    self.file.sync_all()?;
-                    self.write_counter = 0;
-                }
-            }
-            WalSyncMode::None => {
-                // No sync
-            }
-        }
-        
-        Ok(())
-    }
-    
-    fn replay(&mut self) -> Result<Vec<WalEntry>> {
-        let mut entries = Vec::new();
-        
-        // Seek to beginning
-        self.file.seek(SeekFrom::Start(0))?;
-        
-        loop {
-            // Read length
-            let mut len_bytes = [0u8; 4];
-            match self.file.read_exact(&mut len_bytes) {
-                Ok(_) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-                Err(e) => return Err(e.into()),
-            }
-            
-            let len = u32::from_le_bytes(len_bytes) as usize;
-            
-            // Read entry
-            let mut entry_bytes = vec![0u8; len];
-            match self.file.read_exact(&mut entry_bytes) {
-                Ok(_) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                    // Partial entry, stop here
-                    break;
-                }
-                Err(e) => return Err(e.into()),
-            }
-            
-            // Deserialize
-            match bincode::deserialize::<WalEntry>(&entry_bytes) {
-                Ok(entry) => {
-                    // Verify checksum
-                    let operation_bytes = bincode::serialize(&entry.operation)?;
-                    let computed_checksum = crc32fast::hash(&operation_bytes);
-                    
-                    if computed_checksum == entry.checksum {
-                        entries.push(entry);
-                    } else {
-                        // Checksum mismatch, stop replay
-                        eprintln!("WAL checksum mismatch, stopping replay");
-                        break;
-                    }
-                }
-                Err(_) => {
-                    // Corruption, stop replay
-                    eprintln!("WAL entry corruption, stopping replay");
-                    break;
-                }
-            }
-        }
-        
-        Ok(entries)
-    }
-    
-    fn sync(&mut self) -> Result<()> {
-        self.file.sync_all()?;
-        Ok(())
-    }
-    
-    fn truncate_to(&mut self, _sequence_number: u64) -> Result<()> {
-        // For now, just clear the WAL
-        // TODO: Implement proper truncation to specific sequence number
-        self.file.set_len(0)?;
-        self.file.seek(SeekFrom::Start(0))?;
-        self.current_size = 0;
-        Ok(())
-    }
-    
-    fn size(&self) -> Result<u64> {
-        Ok(self.current_size)
-    }
 }
 
 // End of lib.rs
