@@ -5,8 +5,9 @@ use crate::{Key, Value, Result};
 use crate::sstable_new::{SsTableHandle, SsTableWriter, RunNumber};
 use std::path::PathBuf;
 use std::collections::BTreeMap;
+use serde::{Serialize, Deserialize};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum CompactionStrategy {
     Tiered {
         size_ratio: f64,

@@ -5,6 +5,7 @@ mod atomic_file;
 mod checksum;
 mod checksum_handle;
 mod session_lock;
+mod snapshot;
 mod sstable;
 mod sstable_new;  // New Haskell-format SSTable (will replace sstable.rs)
 mod compaction;
@@ -25,6 +26,7 @@ use session_lock::SessionLock;
 // Re-export public types
 pub use merkle::{IncrementalMerkleTree, MerkleProof, MerkleRoot, MerkleLeaf, Direction, Hash, MerkleDiff, MerkleSnapshot};
 pub use monoidal::{Monoidal, MonoidalLsmTree, MonoidalSnapshot};
+pub use snapshot::{PersistentSnapshot, SnapshotMetadata, SnapshotRun};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -87,7 +89,7 @@ impl AsRef<[u8]> for Value {
 
 // ===== Configuration =====
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LsmConfig {
     // Memory settings
     pub memtable_size: usize,
@@ -165,14 +167,14 @@ impl Default for LsmConfig {
 // Re-export CompactionStrategy
 pub use compaction::CompactionStrategy;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum WalSyncMode {
     Always,
     Periodic(usize),
     None,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum CompressionAlgorithm {
     None,
     Lz4,
@@ -794,7 +796,7 @@ impl LsmTree {
         let memtable = self.memtable.read().unwrap();
         let immutables = self.immutable_memtables.read().unwrap();
         let sstables = self.sstables.read().unwrap();
-        
+
         Ok(LsmStats {
             memtable_size_bytes: memtable.size_bytes() as u64,
             immutable_memtables_count: immutables.len(),
@@ -803,6 +805,43 @@ impl LsmTree {
             compactions_running: 0,
             bloom_filter_false_positives: 0,
         })
+    }
+
+    /// Create a persistent snapshot with hard-links to current SSTables
+    ///
+    /// This flushes the memtable first to ensure all data is persisted,
+    /// then creates a snapshot in the snapshots/ directory using hard-links.
+    pub fn save_snapshot(&mut self, name: &str, label: &str) -> Result<()> {
+        // Flush memtable to ensure all data is persisted
+        self.flush_memtable()?;
+
+        // Get current sequence number and SSTables
+        let sequence_number = *self.sequence_number.read().unwrap();
+        let sstables = self.sstables.read().unwrap();
+
+        // Create snapshot using hard-links
+        PersistentSnapshot::create(
+            &self.path,
+            name,
+            label,
+            &sstables,
+            sequence_number,
+            &self.config,
+        )?;
+
+        Ok(())
+    }
+
+    /// List all available snapshots
+    pub fn list_snapshots(&self) -> Result<Vec<String>> {
+        snapshot::list_snapshots(&self.path)
+    }
+
+    /// Delete a snapshot by name
+    pub fn delete_snapshot(&self, name: &str) -> Result<()> {
+        let snapshot = PersistentSnapshot::load(&self.path, name)?;
+        snapshot.delete()
+            .map_err(|e| Error::Io(e))
     }
 }
 
