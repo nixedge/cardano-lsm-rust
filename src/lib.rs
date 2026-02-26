@@ -16,7 +16,7 @@ use std::sync::{Arc, RwLock};
 use serde::{Serialize, Deserialize};
 use std::fs::{File, OpenOptions};
 use std::io::{Write, Read, Seek, SeekFrom};
-use sstable::{SsTableWriter, SsTableHandle};
+use sstable_new::{SsTableWriter, SsTableHandle, RunNumber};
 use compaction::Compactor;
 use atomic_file::fsync_directory;
 
@@ -264,6 +264,9 @@ pub struct LsmTree {
     // Sequence number for ordering
     sequence_number: Arc<RwLock<u64>>,
 
+    // Next run number for SSTable creation
+    next_run_number: Arc<RwLock<RunNumber>>,
+
     // WAL (will be removed in Phase 2)
     wal: Arc<RwLock<WriteAheadLog>>,
 
@@ -303,20 +306,34 @@ impl LsmTree {
         let mut memtable = MemTable::new(sequence_number);
 
         // Load existing SSTables from active/ directory
+        // Discover run numbers by looking for .keyops files
         let mut sstables = Vec::new();
+        let mut max_run_number = 0u64;
+
         for entry in std::fs::read_dir(&active_dir)? {
             let entry = entry?;
             let path = entry.path();
+
             // Look for .keyops files (Haskell SSTable format)
-            // Old .sst files also supported for backward compatibility during migration
-            let ext = path.extension().and_then(|s| s.to_str());
-            if ext == Some("keyops") || ext == Some("sst") {
-                match SsTableHandle::open(path) {
-                    Ok(handle) => sstables.push(handle),
-                    Err(e) => eprintln!("Failed to load SSTable: {}", e),
+            if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+                if ext == "keyops" {
+                    // Extract run number from filename (e.g., "00042.keyops" -> 42)
+                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                        if let Ok(run_num) = stem.parse::<RunNumber>() {
+                            max_run_number = max_run_number.max(run_num);
+
+                            match SsTableHandle::open(&active_dir, run_num) {
+                                Ok(handle) => sstables.push(handle),
+                                Err(e) => eprintln!("Failed to load SSTable run {}: {}", run_num, e),
+                            }
+                        }
+                    }
                 }
             }
         }
+
+        // Next run number starts after the highest existing one
+        let next_run_number = max_run_number + 1;
         
         // Sort SSTables by min_key (oldest first)
         sstables.sort_by(|a, b| a.min_key.cmp(&b.min_key));
@@ -351,6 +368,7 @@ impl LsmTree {
             memtable: Arc::new(RwLock::new(memtable)),
             immutable_memtables: Arc::new(RwLock::new(Vec::new())),
             sequence_number: Arc::new(RwLock::new(sequence_number)),
+            next_run_number: Arc::new(RwLock::new(next_run_number)),
             wal: Arc::new(RwLock::new(wal)),
             sstables: Arc::new(RwLock::new(sstables)),
             compactor,
@@ -463,7 +481,7 @@ impl LsmTree {
                 match sstable.range(from, to) {
                     Ok(sstable_entries) => {
                         for (k, v) in sstable_entries {
-                            entries.entry(k).or_insert(Some(v));
+                            entries.entry(k).or_insert(v);
                         }
                     }
                     Err(e) => {
@@ -539,29 +557,34 @@ impl LsmTree {
             let new_memtable = MemTable::new(seq);
             std::mem::replace(&mut *memtable, new_memtable)
         };
-        
+
         // Don't flush empty memtables
         if old_memtable.is_empty() {
             return Ok(());
         }
-        
-        // Write to SSTable
-        let seq = old_memtable.sequence_number;
-        let sstable_path = self.path.join("sstables").join(format!("{:016x}.sst", seq));
-        
-        let mut writer = SsTableWriter::new(sstable_path)?;
-        
+
+        // Get next run number and increment
+        let run_number = {
+            let mut run_num = self.next_run_number.write().unwrap();
+            let current = *run_num;
+            *run_num += 1;
+            current
+        };
+
+        // Write to SSTable using new multi-file format
+        let mut writer = SsTableWriter::new(&self.active_dir, run_number)?;
+
         for (key, value_opt) in old_memtable.iter() {
-            writer.add(key.clone(), value_opt.clone());
+            writer.add(key.clone(), value_opt.clone())?;
         }
-        
+
         let handle = writer.finish()?;
-        
+
         // Add to SSTable list
         {
             let mut sstables = self.sstables.write().unwrap();
             sstables.push(handle);
-            
+
             // Check if we should trigger compaction
             if sstables.len() >= self.config.level0_compaction_trigger {
                 drop(sstables); // Release lock before compaction
@@ -569,21 +592,22 @@ impl LsmTree {
                 self.compact()?;
             }
         }
-        
+
         // Clear WAL since data is now persisted
         {
+            let seq = old_memtable.sequence_number;
             let mut wal = self.wal.write().unwrap();
             wal.truncate_to(seq)?;
         }
-        
+
         Ok(())
     }
     
     pub fn compact(&mut self) -> Result<()> {
         let sstables = self.sstables.read().unwrap();
-        
+
         // Select tables to compact
-        let job = match self.compactor.select_compaction(&sstables) {
+        let job = match self.compactor.select_compaction(&*sstables) {
             Some(job) => job,
             None => {
                 // Nothing to compact
@@ -592,10 +616,18 @@ impl LsmTree {
         };
         
         drop(sstables); // Release read lock
-        
+
+        // Get next run number for compacted SSTable
+        let run_number = {
+            let mut run_num = self.next_run_number.write().unwrap();
+            let current = *run_num;
+            *run_num += 1;
+            current
+        };
+
         // Execute compaction
         let sstables_for_compact = self.sstables.read().unwrap().clone();
-        let result = self.compactor.compact(job, &sstables_for_compact)?;
+        let result = self.compactor.compact(job, &sstables_for_compact, &self.active_dir, run_number)?;
         
         // Update SSTable list
         {
@@ -608,8 +640,8 @@ impl LsmTree {
             for idx in to_remove {
                 if idx < sstables.len() {
                     let removed = sstables.remove(idx);
-                    // Delete the file
-                    if let Err(e) = std::fs::remove_file(&removed.path) {
+                    // Delete all files for this SSTable run
+                    if let Err(e) = removed.delete_files() {
                         eprintln!("Failed to delete old SSTable: {}", e);
                     }
                 }
@@ -640,9 +672,17 @@ impl LsmTree {
         };
         
         drop(sstables);
-        
+
+        // Get next run number for compacted SSTable
+        let run_number = {
+            let mut run_num = self.next_run_number.write().unwrap();
+            let current = *run_num;
+            *run_num += 1;
+            current
+        };
+
         let sstables_for_compact = self.sstables.read().unwrap().clone();
-        let result = self.compactor.compact(job, &sstables_for_compact)?;
+        let result = self.compactor.compact(job, &sstables_for_compact, &self.active_dir, run_number)?;
         
         // Update SSTable list
         {
@@ -650,7 +690,7 @@ impl LsmTree {
             
             // Clear all old SSTables
             for sstable in sstables.drain(..) {
-                if let Err(e) = std::fs::remove_file(&sstable.path) {
+                if let Err(e) = sstable.delete_files() {
                     eprintln!("Failed to delete old SSTable: {}", e);
                 }
             }
@@ -718,7 +758,7 @@ impl LsmTree {
         // Count SSTable sizes
         let sstables = self.sstables.read().unwrap();
         for sstable in sstables.iter() {
-            if let Ok(metadata) = std::fs::metadata(&sstable.path) {
+            if let Ok(metadata) = std::fs::metadata(sstable.path()) {
                 total += metadata.len();
             }
         }
@@ -838,7 +878,7 @@ impl LsmSnapshot {
         for sstable in &self.sstables {
             if let Ok(sstable_entries) = sstable.range(&Key::from(b""), &Key::from(&[0xFF; 256])) {
                 for (k, v) in sstable_entries {
-                    entries.entry(k).or_insert(Some(v));
+                    entries.entry(k).or_insert(v);
                 }
             }
         }

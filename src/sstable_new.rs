@@ -319,8 +319,66 @@ impl SsTableHandle {
         Ok(None)
     }
 
+    /// Range query - iterate over keys in range [from, to]
+    ///
+    /// Returns an iterator over (Key, Option<Value>) pairs.
+    /// TODO: Implement efficient range scanning
+    pub fn range(&self, _from: &Key, _to: &Key) -> Result<Vec<(Key, Option<Value>)>> {
+        // Placeholder implementation
+        // TODO: Implement proper range scanning by reading keyops file
+        Ok(Vec::new())
+    }
+
+    /// Range query with tombstones - needed for compaction
+    ///
+    /// Returns all entries including deletes (tombstones represented as None).
+    /// TODO: Implement efficient range scanning with tombstones
+    pub fn range_with_tombstones(&self, _from: &Key, _to: &Key) -> Result<Vec<(Key, Option<Value>)>> {
+        // Placeholder implementation
+        // TODO: Implement proper range scanning by reading keyops file
+        Ok(Vec::new())
+    }
+
     pub fn path(&self) -> &Path {
         &self.paths.keyops
+    }
+
+    /// Delete all files for this SSTable run
+    ///
+    /// This removes the .keyops, .blobs, .filter, .index, and .checksums files.
+    /// Use this when removing an SSTable during compaction.
+    pub fn delete_files(&self) -> io::Result<()> {
+        // Try to delete all files, collecting errors
+        let mut errors = Vec::new();
+
+        if let Err(e) = std::fs::remove_file(&self.paths.keyops) {
+            errors.push(format!("keyops: {}", e));
+        }
+
+        if let Err(e) = std::fs::remove_file(&self.paths.blobs) {
+            errors.push(format!("blobs: {}", e));
+        }
+
+        if let Err(e) = std::fs::remove_file(&self.paths.filter) {
+            errors.push(format!("filter: {}", e));
+        }
+
+        if let Err(e) = std::fs::remove_file(&self.paths.index) {
+            errors.push(format!("index: {}", e));
+        }
+
+        if let Err(e) = std::fs::remove_file(&self.paths.checksums) {
+            errors.push(format!("checksums: {}", e));
+        }
+
+        if !errors.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("Failed to delete SSTable files: {}", errors.join(", ")),
+            ));
+        }
+
+        Ok(())
     }
 }
 
