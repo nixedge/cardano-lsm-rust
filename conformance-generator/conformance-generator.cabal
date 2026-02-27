@@ -34,7 +34,7 @@ library
     import:           warnings
     exposed-modules:  ConformanceGen
     
-    build-depends:    
+    build-depends:
         base >= 4.14 && < 5
       , QuickCheck
       , aeson
@@ -46,6 +46,10 @@ library
       , directory
       , filepath
       , temporary
+      , lsm-tree
+      , fs-api
+      , blockio
+      , vector
     
     hs-source-dirs:   src
     default-language: GHC2021

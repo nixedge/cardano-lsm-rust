@@ -1,10 +1,16 @@
 packages: .
+  ../../lsm-tree/lsm-tree
+  ../../lsm-tree/blockio
 
--- Use a more recent index state
-index-state: 2025-01-01T00:00:00Z
+-- Use same index state as lsm-tree for consistency
+index-state: 2025-12-10T00:00:00Z
 
--- Allow newer versions across the board
-allow-newer: all
+tests: True
+benchmarks: False
+
+-- Use serial HasBlockIO to avoid liburing dependency
+package blockio
+  flags: +serialblockio
 
 -- Specific overrides for known issues
 constraints:
