@@ -5,6 +5,10 @@
 //   [Index block: key offsets for binary search]
 //   [Bloom filter: for fast negative lookups]
 //   [Footer: offsets to index and bloom filter]
+//
+// NOTE: This is the old SSTable implementation, kept for reference.
+// The active implementation is in sstable_new.rs.
+#![allow(dead_code)]
 
 use std::fs::{File, OpenOptions};
 use std::io::{Write, Read, Seek, SeekFrom, BufWriter};

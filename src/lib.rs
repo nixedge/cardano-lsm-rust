@@ -248,6 +248,7 @@ impl MemTable {
 pub struct LsmTree {
     path: PathBuf,
     active_dir: PathBuf,     // active/ - mutable SSTables
+    #[allow(dead_code)]
     snapshots_dir: PathBuf,  // snapshots/ - persistent snapshots
     config: LsmConfig,
 

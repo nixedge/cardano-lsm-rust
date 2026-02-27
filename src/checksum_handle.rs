@@ -42,6 +42,7 @@ impl ChecksumHandle {
     ///
     /// Useful when you've already opened the file and want to start
     /// tracking checksums from this point forward.
+    #[allow(dead_code)]
     pub fn from_file(file: File) -> Self {
         ChecksumHandle {
             file,
@@ -53,6 +54,7 @@ impl ChecksumHandle {
     ///
     /// Returns the number of bytes written (like std::io::Write::write).
     /// Note: Unlike write_all, this may do a partial write.
+    #[allow(dead_code)]
     pub fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let n = self.file.write(buf)?;
         // Only update checksum for bytes actually written
@@ -73,6 +75,7 @@ impl ChecksumHandle {
     ///
     /// This ensures data is written to the OS, but does not guarantee
     /// it's on persistent storage. Use sync_all() for durability.
+    #[allow(dead_code)]
     pub fn flush(&mut self) -> io::Result<()> {
         self.file.flush()
     }
@@ -81,6 +84,7 @@ impl ChecksumHandle {
     ///
     /// This is what you need for durability - ensures data is on
     /// persistent storage, not just in OS buffers.
+    #[allow(dead_code)]
     pub fn sync_all(&mut self) -> io::Result<()> {
         self.file.sync_all()
     }
@@ -89,6 +93,7 @@ impl ChecksumHandle {
     ///
     /// Useful for debugging or progress tracking.
     /// Note: This clones the hasher to avoid consuming it.
+    #[allow(dead_code)]
     pub fn current_checksum(&self) -> CRC32C {
         CRC32C(self.hasher.clone().finalize())
     }
@@ -106,6 +111,7 @@ impl ChecksumHandle {
     ///
     /// Returns the checksum but does NOT sync data to disk.
     /// Only use this if you're going to sync via other means.
+    #[allow(dead_code)]
     pub fn close_no_sync(self) -> CRC32C {
         CRC32C(self.hasher.finalize())
     }
@@ -120,6 +126,7 @@ impl ChecksumHandle {
     ///
     /// The bloom filter is serialized and written, with checksum
     /// updated accordingly.
+    #[allow(dead_code)]
     pub fn write_bloom_filter(&mut self, filter_bytes: &[u8]) -> io::Result<()> {
         self.write_all(filter_bytes)
     }
@@ -127,6 +134,7 @@ impl ChecksumHandle {
     /// Write an index chunk to the handle
     ///
     /// Index data is written with checksum tracking.
+    #[allow(dead_code)]
     pub fn write_index(&mut self, index_bytes: &[u8]) -> io::Result<()> {
         self.write_all(index_bytes)
     }
@@ -134,6 +142,7 @@ impl ChecksumHandle {
     /// Write a data page (key-ops) to the handle
     ///
     /// This writes the raw page data with checksum tracking.
+    #[allow(dead_code)]
     pub fn write_keyops_page(&mut self, page_bytes: &[u8]) -> io::Result<()> {
         self.write_all(page_bytes)
     }
@@ -141,6 +150,7 @@ impl ChecksumHandle {
     /// Write blob data to the handle
     ///
     /// Returns the number of bytes written (useful for tracking blob offsets).
+    #[allow(dead_code)]
     pub fn write_blob(&mut self, blob_data: &[u8]) -> io::Result<usize> {
         self.write_all(blob_data)?;
         Ok(blob_data.len())

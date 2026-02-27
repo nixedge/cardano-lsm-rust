@@ -74,6 +74,7 @@ impl AtomicFileWriter {
     /// Get mutable reference to the underlying writer
     ///
     /// Useful for writing with std::io::Write methods
+    #[allow(dead_code)]
     pub fn as_writer(&mut self) -> io::Result<&mut dyn Write> {
         self.file.as_mut()
             .map(|f| f as &mut dyn Write)
@@ -118,6 +119,7 @@ impl AtomicFileWriter {
     ///
     /// This is called automatically on Drop if commit() wasn't called,
     /// but you can call it explicitly if you want to handle errors.
+    #[allow(dead_code)]
     pub fn abort(mut self) -> io::Result<()> {
         self.file.take(); // Close the file
         std::fs::remove_file(&self.temp_path)?;
@@ -167,6 +169,7 @@ pub fn fsync_directory<P: AsRef<Path>>(path: P) -> io::Result<()> {
 /// 3. Commit
 ///
 /// Returns Ok(()) if the file was successfully written and committed.
+#[allow(dead_code)]
 pub fn atomic_write<P: AsRef<Path>>(path: P, data: &[u8]) -> io::Result<()> {
     let mut writer = AtomicFileWriter::new(path)?;
     writer.write_all(data)?;

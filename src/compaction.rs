@@ -26,7 +26,9 @@ pub enum CompactionStrategy {
 }
 
 pub struct Compactor {
+    #[allow(dead_code)]
     strategy: CompactionStrategy,
+    #[allow(dead_code)]
     base_path: PathBuf,
 }
 
@@ -39,6 +41,7 @@ impl Compactor {
     }
     
     /// Select which SSTables need compaction
+    #[allow(dead_code)]
     pub fn select_compaction(&self, sstables: &[SsTableHandle]) -> Option<CompactionJob> {
         match &self.strategy {
             CompactionStrategy::Tiered { size_ratio, min_merge_width, max_merge_width } => {
@@ -59,7 +62,8 @@ impl Compactor {
             }
         }
     }
-    
+
+    #[allow(dead_code)]
     fn select_tiered_compaction(
         &self,
         sstables: &[SsTableHandle],
@@ -115,7 +119,8 @@ impl Compactor {
         
         None
     }
-    
+
+    #[allow(dead_code)]
     fn select_leveled_compaction(
         &self,
         sstables: &[SsTableHandle],

@@ -29,6 +29,7 @@ pub struct CRC32C(pub u32);
 
 impl CRC32C {
     /// Initial CRC32C value (equivalent to crc32c of empty bytestring)
+    #[allow(dead_code)]
     pub const INITIAL: CRC32C = CRC32C(0);
 
     /// Compute CRC32C of a byte slice in one shot
@@ -244,6 +245,7 @@ pub fn check_crc<P: AsRef<Path>>(
 ///
 /// This is a convenience wrapper around check_crc that provides
 /// more detailed error messages.
+#[allow(dead_code)]
 pub fn expect_checksum<P: AsRef<Path>>(
     path: P,
     checksums_file: &ChecksumsFile,

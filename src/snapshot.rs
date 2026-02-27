@@ -5,7 +5,7 @@
 // active/ without copying data.
 
 use std::path::{Path, PathBuf};
-use std::io::{self, Write};
+use std::io;
 use serde::{Serialize, Deserialize};
 
 use crate::sstable_new::{SsTableHandle, RunNumber};

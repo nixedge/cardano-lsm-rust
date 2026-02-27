@@ -29,6 +29,7 @@ pub type RunNumber = u64;
 /// Paths to all files for a single Run
 #[derive(Debug, Clone)]
 pub struct RunPaths {
+    #[allow(dead_code)]
     pub run_number: RunNumber,
     pub keyops: PathBuf,
     pub blobs: PathBuf,
@@ -71,6 +72,7 @@ impl RunPaths {
 /// The writer maintains checksums for all files and writes them
 /// atomically on finish().
 pub struct SsTableWriter {
+    #[allow(dead_code)]
     run_number: RunNumber,
     paths: RunPaths,
 
@@ -756,13 +758,12 @@ mod tests {
         // Initial refcount = 1
         assert_eq!(handle.refcount.load(Ordering::SeqCst), 1);
 
-        // Clone shares refcount (but Rust's Clone creates a new Arc)
+        // Clone increments the refcount (custom Clone implementation)
         let handle2 = handle.clone();
 
-        // Arc::clone doesn't increment our counter, that's expected
-        // The refcount tracks hard-links, not Rust clones
-        assert_eq!(handle.refcount.load(Ordering::SeqCst), 1);
-        assert_eq!(handle2.refcount.load(Ordering::SeqCst), 1);
+        // Both handles share the same refcount Arc, which is now 2
+        assert_eq!(handle.refcount.load(Ordering::SeqCst), 2);
+        assert_eq!(handle2.refcount.load(Ordering::SeqCst), 2);
 
         Ok(())
     }

@@ -24,12 +24,13 @@ pub struct SessionLock {
     #[allow(dead_code)]
     file: File,
     path: PathBuf,
+    #[allow(dead_code)]
     lock_info: LockInfo,
 }
 
 /// Information about the lock holder
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct LockInfo {
+pub(crate) struct LockInfo {
     pid: u32,
     hostname: String,
     timestamp: u64,
@@ -187,6 +188,7 @@ impl SessionLock {
     }
 
     /// Get information about the lock holder
+    #[allow(dead_code)]
     pub fn info(&self) -> &LockInfo {
         &self.lock_info
     }
