@@ -303,60 +303,65 @@ runWithLSMTree TestCase{..} =
         return $ TestResults { results }
   where
     -- Execute operations and collect results
+    -- Now threads the current table through each operation to allow rollback
     executeOperations :: LSM.Table BS.ByteString BS.ByteString
                       -> Map String (LSM.Table BS.ByteString BS.ByteString)
                       -> [Operation]
                       -> IO [OperationResult]
     executeOperations _ _ [] = return []
     executeOperations table snapshots (op:ops) = do
-      (result, newSnapshots) <- executeOperation table snapshots op
-      rest <- executeOperations table newSnapshots ops
+      (result, newTable, newSnapshots) <- executeOperation table snapshots op
+      rest <- executeOperations newTable newSnapshots ops
       return (result : rest)
 
     -- Execute a single operation
+    -- Now returns (result, newTable, newSnapshots) to allow table swapping on rollback
     executeOperation :: LSM.Table BS.ByteString BS.ByteString
                      -> Map String (LSM.Table BS.ByteString BS.ByteString)
                      -> Operation
-                     -> IO (OperationResult, Map String (LSM.Table BS.ByteString BS.ByteString))
+                     -> IO (OperationResult, LSM.Table BS.ByteString BS.ByteString, Map String (LSM.Table BS.ByteString BS.ByteString))
     executeOperation table snapshots (Insert k v) = do
       LSM.insert table k v
-      return (OkUnit, snapshots)
+      return (OkUnit, table, snapshots)
 
     executeOperation table snapshots (Get k) = do
       maybeVal <- LSM.lookup table k
       let result = case maybeVal of
             Just v -> Ok (Just (encodeB64 v))
             Nothing -> Ok Nothing
-      return (result, snapshots)
+      return (result, table, snapshots)
 
     executeOperation table snapshots (Delete k) = do
       LSM.delete table k
-      return (OkUnit, snapshots)
+      return (OkUnit, table, snapshots)
 
     executeOperation table snapshots (Range from to) = do
       let range = LSM.FromToIncluding from to
       entries <- LSM.rangeLookup table range
       let pairs = [(encodeB64 k, encodeB64 v) | (k, v) <- V.toList entries]
-      return (OkRange pairs, snapshots)
+      return (OkRange pairs, table, snapshots)
 
     executeOperation table snapshots (Snapshot sid) = do
       -- Note: The Haskell lsm-tree doesn't support in-memory snapshots in the same way
       -- Instead, we use duplicate to create a logical snapshot
       dup <- LSM.duplicate table
-      return (OkUnit, Map.insert sid dup snapshots)
+      return (OkUnit, table, Map.insert sid dup snapshots)
 
     executeOperation table snapshots (Rollback sid) = do
-      -- Rollback by closing current table and using snapshot
-      -- Note: This is a limitation - we can't actually "rollback" the table in place
-      -- For conformance testing, we acknowledge this semantic difference
+      -- Rollback by swapping to the snapshot table
+      -- Since duplicate() creates a separate table, we can use it directly
       case Map.lookup sid snapshots of
-        Just _ -> return (OkUnit, snapshots)  -- Accept but can't truly rollback
-        Nothing -> return (Err "Snapshot not found", snapshots)
+        Just snapshotTable -> do
+          -- Create a new duplicate of the snapshot to use as current table
+          -- This ensures subsequent operations work on the rolled-back state
+          newTable <- LSM.duplicate snapshotTable
+          return (OkUnit, newTable, snapshots)
+        Nothing -> return (Err "Snapshot not found", table, snapshots)
 
     executeOperation table snapshots Compact = do
       -- The Simple API doesn't expose compaction directly
       -- Compaction happens automatically in the background
-      return (OkUnit, snapshots)
+      return (OkUnit, table, snapshots)
 
 --------------------------------------------------------------------------------
 -- Helper Functions
