@@ -225,29 +225,28 @@ genOperation opsRemaining currentSnapshots = frequency $
       , (10, genRangeOp)
       , (5, return Compact)
       ]
-    
+
     -- Range operation with proper ordering
     genRangeOp = do
       k1 <- genKey
       k2 <- genKey
       let (from, to) = if k1 <= k2 then (k1, k2) else (k2, k1)
       return $ Range from to
-    
+
     -- Snapshot operations (more common early in test)
     snapshotOps
       | opsRemaining > 50 = [(5, genSnapshotOp)]
       | opsRemaining > 10 = [(3, genSnapshotOp)]
       | otherwise = [(1, genSnapshotOp)]
-    
-    genSnapshotOp = do
-      snapNum <- choose (0 :: Int, 999)
-      return $ Snapshot $ "snap_" ++ show snapNum
-    
+
+    -- Generate snapshot with sequential IDs based on current snapshot count
+    genSnapshotOp = return $ Snapshot $ "snap_" ++ show currentSnapshots
+
     -- Rollback operations (only if snapshots exist)
     rollbackOps
       | currentSnapshots > 0 = [(3, genRollbackOp currentSnapshots)]
       | otherwise = []
-    
+
     genRollbackOp n = do
       snapNum <- choose (0, n - 1)
       return $ Rollback $ "snap_" ++ show snapNum
@@ -258,7 +257,7 @@ genOperationSequence 0 _ _ = return []
 genOperationSequence n maxSnaps currentSnaps = do
   op <- genOperation n currentSnaps
   let newSnapCount = case op of
-        Snapshot {} -> min (currentSnaps + 1) maxSnaps
+        Snapshot {} -> currentSnaps + 1  -- Always increment for unique IDs
         _ -> currentSnaps
   rest <- genOperationSequence (n - 1) maxSnaps newSnapCount
   return (op : rest)
