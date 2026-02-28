@@ -31,14 +31,18 @@
                 ../Cargo.toml
                 ../src
                 ../tests
+                ../benches
               ];
             };
 
           nativeBuildInputs = with pkgs; [
             pkg-config
           ];
-          
+
           doCheck = true;
+
+          # Skip conformance tests in Nix builds (requires 193MB of generated test data)
+          cargoTestOptions = x: x ++ ["--" "--skip" "conformance_tests"];
 
           meta = {
             description = "Pure Rust port of Cardano's LSM tree for blockchain indexing";
