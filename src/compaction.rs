@@ -209,14 +209,19 @@ impl Compactor {
         // Collect all entries from source runs
         let mut all_entries: BTreeMap<Key, Option<Value>> = BTreeMap::new();
 
-        for &idx in &job.source_runs {
+        // Sort source runs by run_number in ASCENDING order (oldest first)
+        // so that newer values overwrite older ones when inserted into BTreeMap
+        let mut sorted_indices: Vec<usize> = job.source_runs.clone();
+        sorted_indices.sort_by_key(|&idx| source_level_runs[idx].run_number());
+
+        for &idx in &sorted_indices {
             let sstable = &source_level_runs[idx];
 
             // Read all entries including tombstones
             let entries = sstable.range_with_tombstones(&Key::from(b""), &Key::from(&[0xFF; 256]))?;
 
             for (key, value_opt) in entries {
-                // Later entries overwrite earlier ones
+                // Later (newer) entries overwrite earlier (older) ones
                 all_entries.insert(key, value_opt);
             }
         }
@@ -275,14 +280,19 @@ impl Compactor {
         // Collect all entries from input SSTables (including tombstones!)
         let mut all_entries: BTreeMap<Key, Option<Value>> = BTreeMap::new();
 
-        for &idx in &job.inputs {
+        // Sort inputs by run_number in ASCENDING order (oldest first)
+        // so that newer values overwrite older ones when inserted into BTreeMap
+        let mut sorted_indices: Vec<usize> = job.inputs.clone();
+        sorted_indices.sort_by_key(|&idx| sstables[idx].run_number());
+
+        for &idx in &sorted_indices {
             let sstable = &sstables[idx];
 
             // Read all entries from this SSTable INCLUDING tombstones
             let entries = sstable.range_with_tombstones(&Key::from(b""), &Key::from(&[0xFF; 256]))?;
 
             for (key, value_opt) in entries {
-                // Later entries overwrite earlier ones (including tombstones)
+                // Later (newer) entries overwrite earlier (older) ones (including tombstones)
                 all_entries.insert(key, value_opt);
             }
         }

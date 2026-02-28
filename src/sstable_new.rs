@@ -324,6 +324,13 @@ impl SsTableHandle {
         self.get_backend(key, &IoBackend::default())
     }
 
+    /// Get the run number for this SSTable
+    ///
+    /// Run numbers are monotonically increasing, so higher run numbers indicate more recent SSTables.
+    pub fn run_number(&self) -> RunNumber {
+        self.paths.run_number
+    }
+
     /// Get a value by key using specific I/O backend
     pub fn get_backend(&self, key: &Key, backend: &IoBackend) -> Result<Option<Value>> {
         // Check bloom filter first (fast negative lookup)

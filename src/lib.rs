@@ -528,7 +528,11 @@ impl LsmTree {
         {
             let levels = self.levels.read().unwrap();
             for level in levels.iter() {
-                for sstable in level.iter().rev() {
+                // Sort SSTables by run_number in DESCENDING order (newest first)
+                let mut sorted_sstables: Vec<&crate::sstable_new::SsTableHandle> = level.iter().collect();
+                sorted_sstables.sort_by(|a, b| b.run_number().cmp(&a.run_number()));
+
+                for sstable in sorted_sstables {
                     // Check if key could be in this SSTable
                     if key >= &sstable.min_key && key <= &sstable.max_key {
                         if let Some(value) = sstable.get(key)? {
@@ -565,11 +569,16 @@ impl LsmTree {
         // Collect all entries from all levels
         let mut entries: BTreeMap<Key, Option<Value>> = BTreeMap::new();
 
-        // From SSTables (lowest level first, lowest priority)
+        // From SSTables (lowest level first, then newest SSTables within each level)
         {
             let levels = self.levels.read().unwrap();
             for level in levels.iter().rev() {
-                for sstable in level.iter() {
+                // Sort SSTables by run_number in DESCENDING order (newest first)
+                // so newer values overwrite older ones
+                let mut sorted_sstables: Vec<&crate::sstable_new::SsTableHandle> = level.iter().collect();
+                sorted_sstables.sort_by(|a, b| b.run_number().cmp(&a.run_number()));
+
+                for sstable in sorted_sstables {
                     match sstable.range(from, to) {
                         Ok(sstable_entries) => {
                             for (k, v) in sstable_entries {
