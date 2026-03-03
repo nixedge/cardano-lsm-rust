@@ -255,11 +255,33 @@ impl SsTableHandle {
     pub fn open(active_dir: &Path, run_number: RunNumber) -> Result<Self> {
         let paths = RunPaths::new(active_dir, run_number);
 
-        // Verify all files exist
+        // Verify all files exist and provide detailed error about which files are missing
         if !paths.all_exist() {
+            let mut missing = Vec::new();
+            if !paths.keyops.exists() {
+                missing.push(paths.keyops.display().to_string());
+            }
+            if !paths.blobs.exists() {
+                missing.push(paths.blobs.display().to_string());
+            }
+            if !paths.filter.exists() {
+                missing.push(paths.filter.display().to_string());
+            }
+            if !paths.index.exists() {
+                missing.push(paths.index.display().to_string());
+            }
+            if !paths.checksums.exists() {
+                missing.push(paths.checksums.display().to_string());
+            }
+
             return Err(Error::Io(io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("SSTable files missing for run {}", run_number),
+                format!(
+                    "SSTable files missing for run {} in directory {}:\n  {}",
+                    run_number,
+                    active_dir.display(),
+                    missing.join("\n  ")
+                ),
             )));
         }
 

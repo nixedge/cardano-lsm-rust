@@ -437,7 +437,14 @@ impl LsmTree {
                 }
                 Err(e) => {
                     return Err(Error::InvalidOperation(
-                        format!("Failed to load SSTable run {} from snapshot: {}", run.run_number, e)
+                        format!(
+                            "Failed to load SSTable run {} from snapshot '{}' at {}:\n  {}\n\nThis snapshot may be corrupted. \
+                             Consider deleting it and using a previous snapshot.",
+                            run.run_number,
+                            snapshot_name,
+                            snapshot_dir.display(),
+                            e
+                        )
                     ));
                 }
             }

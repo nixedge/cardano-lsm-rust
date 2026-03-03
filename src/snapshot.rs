@@ -168,6 +168,77 @@ impl PersistentSnapshot {
         })
     }
 
+    /// Validate that all SSTable files referenced in the snapshot exist
+    ///
+    /// This checks that all 5 required files (.keyops, .blobs, .filter, .index, .checksums)
+    /// exist for each run in the snapshot metadata.
+    ///
+    /// Returns detailed error information about which files are missing.
+    pub fn validate(&self) -> Result<()> {
+        use crate::sstable_new::RunPaths;
+
+        for run in &self.metadata.runs {
+            let paths = RunPaths::new(&self.path, run.run_number);
+
+            // Check each required file individually for detailed error reporting
+            let mut missing_files = Vec::new();
+
+            if !paths.keyops.exists() {
+                missing_files.push(paths.keyops.display().to_string());
+            }
+            if !paths.blobs.exists() {
+                missing_files.push(paths.blobs.display().to_string());
+            }
+            if !paths.filter.exists() {
+                missing_files.push(paths.filter.display().to_string());
+            }
+            if !paths.index.exists() {
+                missing_files.push(paths.index.display().to_string());
+            }
+            if !paths.checksums.exists() {
+                missing_files.push(paths.checksums.display().to_string());
+            }
+
+            if !missing_files.is_empty() {
+                return Err(Error::Corruption(format!(
+                    "Snapshot '{}' is corrupted - missing SSTable files for run {}:\n  {}",
+                    self.name,
+                    run.run_number,
+                    missing_files.join("\n  ")
+                )));
+            }
+
+            // Verify checksums for this run
+            let checksums = crate::checksum::read_checksums_file(&paths.checksums)?;
+
+            // Check keyops checksum
+            let keyops_expected = crate::checksum::get_checksum(&checksums, "keyops")
+                .map_err(|e| Error::Corruption(format!("Snapshot '{}' run {}: {}", self.name, run.run_number, e)))?;
+            crate::checksum::check_crc(&paths.keyops, keyops_expected)
+                .map_err(|e| Error::Corruption(format!("Snapshot '{}' run {} keyops checksum failed: {}", self.name, run.run_number, e)))?;
+
+            // Check blobs checksum
+            let blobs_expected = crate::checksum::get_checksum(&checksums, "blobs")
+                .map_err(|e| Error::Corruption(format!("Snapshot '{}' run {}: {}", self.name, run.run_number, e)))?;
+            crate::checksum::check_crc(&paths.blobs, blobs_expected)
+                .map_err(|e| Error::Corruption(format!("Snapshot '{}' run {} blobs checksum failed: {}", self.name, run.run_number, e)))?;
+
+            // Check filter checksum
+            let filter_expected = crate::checksum::get_checksum(&checksums, "filter")
+                .map_err(|e| Error::Corruption(format!("Snapshot '{}' run {}: {}", self.name, run.run_number, e)))?;
+            crate::checksum::check_crc(&paths.filter, filter_expected)
+                .map_err(|e| Error::Corruption(format!("Snapshot '{}' run {} filter checksum failed: {}", self.name, run.run_number, e)))?;
+
+            // Check index checksum
+            let index_expected = crate::checksum::get_checksum(&checksums, "index")
+                .map_err(|e| Error::Corruption(format!("Snapshot '{}' run {}: {}", self.name, run.run_number, e)))?;
+            crate::checksum::check_crc(&paths.index, index_expected)
+                .map_err(|e| Error::Corruption(format!("Snapshot '{}' run {} index checksum failed: {}", self.name, run.run_number, e)))?;
+        }
+
+        Ok(())
+    }
+
     /// Delete this snapshot from disk
     pub fn delete(self) -> io::Result<()> {
         // Remove the entire snapshot directory
@@ -313,6 +384,110 @@ mod tests {
             let snapshot_meta = std::fs::metadata(&snapshot_keyops)?;
             assert_eq!(active_meta.ino(), snapshot_meta.ino());
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_snapshot_validation_detects_missing_files() -> Result<()> {
+        let dir = TempDir::new().map_err(|e| Error::Io(e))?;
+        let lsm_path = dir.path();
+        let active_dir = lsm_path.join("active");
+        std::fs::create_dir_all(&active_dir)?;
+
+        // Create an SSTable
+        let mut writer = SsTableWriter::new(&active_dir, 1)?;
+        writer.add(Key::from(b"key1"), Some(Value::from(b"value1")))?;
+        let handle = writer.finish(0)?;
+
+        let sstables = vec![handle];
+        let config = LsmConfig::default();
+
+        // Create snapshot
+        let snapshot = PersistentSnapshot::create(
+            lsm_path,
+            "snap1",
+            "Test snapshot",
+            &sstables,
+            42,
+            &config,
+        )?;
+
+        // Validation should succeed initially
+        assert!(snapshot.validate().is_ok());
+
+        // Simulate the incident: delete SSTable files but leave metadata intact
+        let snapshot_dir = lsm_path.join("snapshots").join("snap1");
+        std::fs::remove_file(snapshot_dir.join("00001.blobs"))?;
+        std::fs::remove_file(snapshot_dir.join("00001.index"))?;
+        std::fs::remove_file(snapshot_dir.join("00001.keyops"))?;
+        std::fs::remove_file(snapshot_dir.join("00001.filter"))?;
+        std::fs::remove_file(snapshot_dir.join("00001.checksums"))?;
+
+        // Load should still succeed (metadata is intact)
+        let loaded = PersistentSnapshot::load(lsm_path, "snap1")?;
+
+        // But validation should now fail and report missing files
+        let validation_result = loaded.validate();
+        assert!(validation_result.is_err());
+
+        // Check that the error message contains information about missing files
+        let err = validation_result.unwrap_err();
+        let err_msg = format!("{}", err);
+        assert!(err_msg.contains("corrupted"));
+        assert!(err_msg.contains("missing"));
+        assert!(err_msg.contains("00001.blobs") || err_msg.contains("SSTable files"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_snapshot_validation_detects_checksum_mismatch() -> Result<()> {
+        let dir = TempDir::new().map_err(|e| Error::Io(e))?;
+        let lsm_path = dir.path();
+        let active_dir = lsm_path.join("active");
+        std::fs::create_dir_all(&active_dir)?;
+
+        // Create an SSTable
+        let mut writer = SsTableWriter::new(&active_dir, 1)?;
+        writer.add(Key::from(b"key1"), Some(Value::from(b"value1")))?;
+        let handle = writer.finish(0)?;
+
+        let sstables = vec![handle];
+        let config = LsmConfig::default();
+
+        // Create snapshot
+        let snapshot = PersistentSnapshot::create(
+            lsm_path,
+            "snap1",
+            "Test snapshot",
+            &sstables,
+            42,
+            &config,
+        )?;
+
+        // Validation should succeed initially
+        assert!(snapshot.validate().is_ok());
+
+        // Corrupt an SSTable file by modifying its contents
+        let snapshot_dir = lsm_path.join("snapshots").join("snap1");
+        let blobs_path = snapshot_dir.join("00001.blobs");
+        let mut data = std::fs::read(&blobs_path)?;
+        if !data.is_empty() {
+            data[0] ^= 0xFF; // Flip bits in first byte
+            std::fs::write(&blobs_path, data)?;
+        }
+
+        // Load should still succeed (metadata is intact)
+        let loaded = PersistentSnapshot::load(lsm_path, "snap1")?;
+
+        // But validation should now fail with checksum error
+        let validation_result = loaded.validate();
+        assert!(validation_result.is_err());
+
+        let err = validation_result.unwrap_err();
+        let err_msg = format!("{}", err);
+        assert!(err_msg.contains("checksum"));
 
         Ok(())
     }
