@@ -321,10 +321,28 @@ fn results_match(actual: &OperationResult, expected: &OperationResult) -> bool {
 fn conformance_tests() {
     let test_files = find_test_cases();
 
+    // Auto-generate test files if they don't exist
     if test_files.is_empty() {
-        panic!("No conformance test files found in conformance-tests/. Run 'just gen-conformance' first.");
+        println!("No conformance test files found. Generating 100 test cases...");
+        println!("This may take a minute...");
+
+        let status = std::process::Command::new("just")
+            .args(&["gen-conformance", "100"])
+            .status()
+            .expect("Failed to run 'just gen-conformance'. Is just installed?");
+
+        if !status.success() {
+            panic!("Failed to generate conformance tests. Run 'just gen-conformance 100' manually.");
+        }
+
+        // Re-scan for test files
+        let test_files_after = find_test_cases();
+        if test_files_after.is_empty() {
+            panic!("Test generation succeeded but no test files found. Check conformance-generator/conformance-tests/");
+        }
     }
 
+    let test_files = find_test_cases();
     println!("\nFound {} conformance test cases", test_files.len());
 
     let mut passed = 0;
