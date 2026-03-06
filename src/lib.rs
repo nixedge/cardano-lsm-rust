@@ -112,8 +112,8 @@ pub struct LsmConfig {
     // SSTables
     pub sstable_size: usize,
     pub sstable_block_size: usize,
-    pub enable_compression: bool,
-    pub compression_algorithm: CompressionAlgorithm,
+    // NOTE: Compression is not yet implemented in the current SSTable format
+    // Future enhancement: Add compression support for SSTables
 
     // I/O backend (sync vs io_uring)
     #[serde(skip)]  // Don't serialize backend config
@@ -150,8 +150,6 @@ impl Default for LsmConfig {
             
             sstable_size: 64 * 1024 * 1024,
             sstable_block_size: 4096,
-            enable_compression: true,
-            compression_algorithm: CompressionAlgorithm::Lz4,
 
             io_backend: IoBackend::default(),  // Default to sync I/O
         }
@@ -160,13 +158,6 @@ impl Default for LsmConfig {
 
 // Re-export CompactionStrategy
 pub use compaction::CompactionStrategy;
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum CompressionAlgorithm {
-    None,
-    Lz4,
-    Snappy,
-}
 
 // ===== MemTable =====
 
@@ -571,7 +562,79 @@ impl LsmTree {
 
         Ok(())
     }
-    
+
+    // ===== Batch Operations =====
+
+    /// Insert multiple key-value pairs in a batch.
+    /// This is more efficient than calling insert() multiple times as it only checks
+    /// for memtable flush once at the end.
+    pub fn insert_batch(&mut self, entries: impl IntoIterator<Item = (Key, Value)>) -> Result<()> {
+        // Ephemeral writes - only persisted via save_snapshot()
+        let entries_vec: Vec<(Key, Value)> = entries.into_iter().collect();
+
+        if entries_vec.is_empty() {
+            return Ok(());
+        }
+
+        // Write all entries to memtable
+        {
+            let mut memtable = self.memtable.write().unwrap();
+            for (key, value) in entries_vec {
+                memtable.insert(key, value);
+            }
+
+            // Check if memtable is full after all inserts
+            if memtable.size_bytes() >= self.config.memtable_size {
+                drop(memtable); // Release lock before flush
+                self.flush_memtable()?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Lookup multiple keys in a batch.
+    /// Returns a vector of Option<Value> in the same order as the input keys.
+    pub fn get_batch(&self, keys: impl IntoIterator<Item = Key>) -> Result<Vec<Option<Value>>> {
+        let keys_vec: Vec<Key> = keys.into_iter().collect();
+        let mut results = Vec::with_capacity(keys_vec.len());
+
+        for key in keys_vec {
+            results.push(self.get(&key)?);
+        }
+
+        Ok(results)
+    }
+
+    /// Delete multiple keys in a batch.
+    /// This is more efficient than calling delete() multiple times as it only checks
+    /// for memtable flush once at the end.
+    pub fn delete_batch(&mut self, keys: impl IntoIterator<Item = Key>) -> Result<()> {
+        let keys_vec: Vec<Key> = keys.into_iter().collect();
+
+        if keys_vec.is_empty() {
+            return Ok(());
+        }
+
+        // Write all tombstones to memtable
+        {
+            let mut memtable = self.memtable.write().unwrap();
+            for key in keys_vec {
+                memtable.delete(key);
+            }
+
+            // Check if memtable is full after all deletes
+            if memtable.size_bytes() >= self.config.memtable_size {
+                drop(memtable); // Release lock before flush
+                self.flush_memtable()?;
+            }
+        }
+
+        Ok(())
+    }
+
+    // ===== Range Queries =====
+
     pub fn range(&self, from: &Key, to: &Key) -> RangeIter {
         // Collect all entries from all levels
         let mut entries: BTreeMap<Key, Option<Value>> = BTreeMap::new();
