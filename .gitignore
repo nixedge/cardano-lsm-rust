@@ -15,7 +15,7 @@ cabal.project.local
 # Nix
 result
 result-*
-.direnv
+.direnv*
 
 # IDE
 .vscode/
@@ -27,3 +27,6 @@ result-*
 # OS
 .DS_Store
 Thumbs.db
+
+# Claude Code
+.claude/settings.local.json
