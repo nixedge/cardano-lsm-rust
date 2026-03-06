@@ -6,6 +6,11 @@
 # Generated conformance tests
 /conformance-tests/
 
+# Cross-format test data
+/cross-format-test-data/
+/cross-format-test-data-rust/
+conformance-generator/cross-format-test-data/
+
 # Haskell build artifacts
 dist-newstyle/
 dist/
