@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 // ===== Test Case Format =====
 
@@ -80,10 +81,31 @@ struct TestRunner {
 
 impl TestRunner {
     fn new(config: &TestConfig, test_name: &str) -> LsmResult<Self> {
-        let temp_dir = std::env::temp_dir().join(format!("conformance_{}", test_name));
+        // Use timestamp and process ID to ensure unique temp directories
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let pid = std::process::id();
+        let temp_dir = std::env::temp_dir()
+            .join(format!("conformance_{}_{}_{}",  test_name, pid, timestamp));
 
-        // Clean up if exists
-        let _ = fs::remove_dir_all(&temp_dir);
+        // Aggressively clean up any old conformance test directories for this test name
+        let base_temp = std::env::temp_dir();
+        if let Ok(entries) = fs::read_dir(&base_temp) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if name.starts_with(&format!("conformance_{}_", test_name)) {
+                        let _ = fs::remove_dir_all(&path);
+                    }
+                }
+            }
+        }
+
+        // Small delay to ensure file system operations complete
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
         fs::create_dir_all(&temp_dir)?;
 
         let lsm_config = LsmConfig {
@@ -192,8 +214,22 @@ impl TestRunner {
 
 impl Drop for TestRunner {
     fn drop(&mut self) {
-        // Clean up temporary directory
-        let _ = fs::remove_dir_all(&self.temp_dir);
+        // Explicitly drop snapshots and tree before cleanup
+        self.snapshots.clear();
+
+        // Clean up temporary directory with retries for robustness
+        for attempt in 0..3 {
+            match fs::remove_dir_all(&self.temp_dir) {
+                Ok(_) => break,
+                Err(_) if attempt < 2 => {
+                    // Small delay before retry
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(_) => {
+                    // Last attempt failed, but don't panic in Drop
+                }
+            }
+        }
     }
 }
 
@@ -275,8 +311,62 @@ fn run_conformance_test(test_path: &Path) -> Result<(), String> {
 
         for (i, actual, expected) in failures.iter().take(5) {
             println!("  Operation {}: ", i);
-            println!("    Expected: {:?}", expected);
-            println!("    Actual:   {:?}", actual);
+
+            // Print summary for range results to avoid extremely long output
+            match (expected, actual) {
+                (OperationResult::OkRange(exp_entries), OperationResult::OkRange(act_entries)) => {
+                    println!("    Expected: OkRange with {} entries", exp_entries.len());
+                    if !exp_entries.is_empty() {
+                        println!("      First entry: key={}", exp_entries[0].0);
+                        if exp_entries.len() > 1 {
+                            println!("      Last entry:  key={}", exp_entries.last().unwrap().0);
+                        }
+                    }
+                    println!("    Actual: OkRange with {} entries", act_entries.len());
+                    if !act_entries.is_empty() {
+                        println!("      First entry: key={}", act_entries[0].0);
+                        if act_entries.len() > 1 {
+                            println!("      Last entry:  key={}", act_entries.last().unwrap().0);
+                        }
+                    }
+
+                    // Find differences
+                    if exp_entries.len() != act_entries.len() {
+                        println!("    Difference: Entry count mismatch");
+
+                        // Find keys in actual but not in expected
+                        let exp_keys: std::collections::HashSet<_> = exp_entries.iter().map(|(k, _)| k).collect();
+                        let act_keys: std::collections::HashSet<_> = act_entries.iter().map(|(k, _)| k).collect();
+
+                        for (idx, (k, _)) in act_entries.iter().enumerate() {
+                            if !exp_keys.contains(k) {
+                                println!("    EXTRA key in actual at index {}: {}", idx, k);
+                            }
+                        }
+
+                        for (idx, (k, _)) in exp_entries.iter().enumerate() {
+                            if !act_keys.contains(k) {
+                                println!("    MISSING key from actual (expected at index {}): {}", idx, k);
+                            }
+                        }
+                    } else {
+                        // Check for key differences
+                        for (idx, (exp, act)) in exp_entries.iter().zip(act_entries.iter()).enumerate() {
+                            if exp.0 != act.0 {
+                                println!("    Difference at index {}: expected key='{}', actual key='{}'", idx, exp.0, act.0);
+                                if idx > 3 {
+                                    println!("    ... (showing first few differences)");
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    println!("    Expected: {:?}", expected);
+                    println!("    Actual:   {:?}", actual);
+                }
+            }
         }
 
         if failures.len() > 5 {
