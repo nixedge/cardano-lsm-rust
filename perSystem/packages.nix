@@ -6,10 +6,15 @@
     pkgs,
     ...
   }: let
-    # Build conformance generator standalone (without lsm-tree for now)
-    # Uses reference model until we integrate haskell.nix properly
-    haskellPackages = pkgs.haskellPackages;
-    
+    # Build conformance generator with broken packages allowed
+    # Some transitive dependencies like quickcheck-state-machine are marked broken in nixpkgs
+    haskellPackages = pkgs.haskellPackages.override {
+      overrides = self: super: {
+        # Allow broken packages needed by lsm-tree dependencies
+        quickcheck-state-machine = pkgs.haskell.lib.unmarkBroken super.quickcheck-state-machine;
+      };
+    };
+
     conformance-gen = haskellPackages.callCabal2nix "conformance-generator" ../conformance-generator {};
   in {
     packages = {
