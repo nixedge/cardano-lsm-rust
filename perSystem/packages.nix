@@ -11,7 +11,9 @@
     haskellPackages = pkgs.haskellPackages.override {
       overrides = self: super: {
         # Allow broken packages needed by lsm-tree dependencies
-        quickcheck-state-machine = pkgs.haskell.lib.unmarkBroken super.quickcheck-state-machine;
+        # Disable tests for quickcheck-state-machine since test dependencies are not available
+        quickcheck-state-machine = pkgs.haskell.lib.dontCheck (pkgs.haskell.lib.unmarkBroken super.quickcheck-state-machine);
+        blockio-uring = pkgs.haskell.lib.unmarkBroken super.blockio-uring;
       };
     };
 
