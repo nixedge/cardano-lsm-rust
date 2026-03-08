@@ -14,6 +14,15 @@
         # Disable tests for quickcheck-state-machine since test dependencies are not available
         quickcheck-state-machine = pkgs.haskell.lib.dontCheck (pkgs.haskell.lib.unmarkBroken super.quickcheck-state-machine);
         blockio-uring = pkgs.haskell.lib.unmarkBroken super.blockio-uring;
+
+        # Override lsm-tree to disable the extras sublibrary (has broken random package usage)
+        lsm-tree = pkgs.haskell.lib.overrideCabal super.lsm-tree (drv: {
+          libraryHaskellDepends = builtins.filter (p: p.pname or "" != "extras") (drv.libraryHaskellDepends or []);
+          # Disable building extras sublibrary by marking it as not buildable
+          postPatch = (drv.postPatch or "") + ''
+            sed -i '/^library extras$/a\  buildable: False' lsm-tree.cabal
+          '';
+        });
       };
     };
 

@@ -21,7 +21,3 @@ constraints:
 -- Relax bounds
 package conformance-generator
   ghc-options: -Wwarn
-
--- Disable extras library (has broken code and we don't need it)
-package lsm-tree
-  extras buildable: False

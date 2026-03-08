@@ -23,7 +23,7 @@
           cabal-install
           haskell-language-server
           
-          # Conformance generator (uses reference model)
+          # Conformance generator (uses local lsm-tree checkout)
           config.packages.conformance-generator
           
           # Task runner
@@ -47,15 +47,12 @@
           echo ""
           echo "📚 Status:"
           echo "  ✅ Rust LSM (127/127 tests passing)"
-          echo "  ✅ Conformance generator (reference model)"
-          echo "  ⏳ Real lsm-tree (needs haskell.nix - separate effort)"
+          echo "  ✅ Conformance generator (using lsm-tree from ../lsm-tree)"
           echo ""
           echo "Commands:"
           echo "  just test                # Run Rust tests"
           echo "  just gen-conformance 10  # Generate 10 conformance tests"
           echo "  just test-conformance    # Run conformance tests"
-          echo ""
-          echo "Note: Conformance tests use reference model until lsm-tree is integrated"
         '';
       };
   };
