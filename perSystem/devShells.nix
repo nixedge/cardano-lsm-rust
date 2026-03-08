@@ -47,7 +47,7 @@
           echo ""
           echo "📚 Status:"
           echo "  ✅ Rust LSM (127/127 tests passing)"
-          echo "  ✅ Conformance generator (using lsm-tree from ../lsm-tree)"
+          echo "  ✅ Conformance generator (using lsm-tree from flake input)"
           echo ""
           echo "Commands:"
           echo "  just test                # Run Rust tests"

@@ -8,6 +8,8 @@
     naersk.inputs.nixpkgs.follows = "nixpkgs";
     treefmt-nix.url = "github:numtide/treefmt-nix";
     treefmt-nix.inputs.nixpkgs.follows = "nixpkgs";
+    lsm-tree.url = "github:input-output-hk/lsm-tree";
+    lsm-tree.flake = false;
   };
 
   outputs = {

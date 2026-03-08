@@ -40,6 +40,22 @@
         "type": "github"
       }
     },
+    "lsm-tree": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1772720830,
+        "narHash": "sha256-Y1JP++XDJAAz+2yPVD7XeQN8KI8fPzy3ajV6gjs1dXU=",
+        "owner": "input-output-hk",
+        "repo": "lsm-tree",
+        "rev": "942b0aa86db2e3616c9b356f8e1c13d0de2ecbb9",
+        "type": "github"
+      },
+      "original": {
+        "owner": "input-output-hk",
+        "repo": "lsm-tree",
+        "type": "github"
+      }
+    },
     "naersk": {
       "inputs": {
         "fenix": "fenix",
@@ -95,6 +111,7 @@
     "root": {
       "inputs": {
         "flake-parts": "flake-parts",
+        "lsm-tree": "lsm-tree",
         "naersk": "naersk",
         "nixpkgs": "nixpkgs",
         "treefmt-nix": "treefmt-nix"
