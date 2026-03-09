@@ -2,7 +2,7 @@
 // Measures performance of core operations and Cardano-specific patterns
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId, Throughput};
-use cardano_lsm::{LsmTree, LsmConfig, Key, Value, CompactionStrategy, IncrementalMerkleTree, MonoidalLsmTree};
+use cardano_lsm::{LsmTree, LsmConfig, Key, Value, IncrementalMerkleTree, MonoidalLsmTree};
 use tempfile::TempDir;
 
 fn create_tree() -> (LsmTree, TempDir) {
@@ -11,6 +11,7 @@ fn create_tree() -> (LsmTree, TempDir) {
     (tree, temp)
 }
 
+#[allow(dead_code)]
 fn create_tree_with_config(config: LsmConfig) -> (LsmTree, TempDir) {
     let temp = TempDir::new().unwrap();
     let tree = LsmTree::open(temp.path(), config).unwrap();

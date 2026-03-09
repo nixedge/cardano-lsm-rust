@@ -85,7 +85,7 @@ impl PersistentSnapshot {
 
             // Create hard-linked copy
             let _linked_handle = sstable.hard_link_to(&snapshot_dir, new_run_number)
-                .map_err(|e| Error::Io(e))?;
+                .map_err(Error::Io)?;
 
             snapshot_runs.push(SnapshotRun {
                 run_number: new_run_number,
@@ -278,7 +278,7 @@ mod tests {
 
     #[test]
     fn test_create_and_load_snapshot() -> Result<()> {
-        let dir = TempDir::new().map_err(|e| Error::Io(e))?;
+        let dir = TempDir::new().map_err(Error::Io)?;
         let lsm_path = dir.path();
         let active_dir = lsm_path.join("active");
         std::fs::create_dir_all(&active_dir)?;
@@ -323,7 +323,7 @@ mod tests {
 
     #[test]
     fn test_list_snapshots() -> Result<()> {
-        let dir = TempDir::new().map_err(|e| Error::Io(e))?;
+        let dir = TempDir::new().map_err(Error::Io)?;
         let lsm_path = dir.path();
         let active_dir = lsm_path.join("active");
         std::fs::create_dir_all(&active_dir)?;
@@ -353,7 +353,7 @@ mod tests {
 
     #[test]
     fn test_snapshot_files_shared() -> Result<()> {
-        let dir = TempDir::new().map_err(|e| Error::Io(e))?;
+        let dir = TempDir::new().map_err(Error::Io)?;
         let lsm_path = dir.path();
         let active_dir = lsm_path.join("active");
         std::fs::create_dir_all(&active_dir)?;
@@ -390,7 +390,7 @@ mod tests {
 
     #[test]
     fn test_snapshot_validation_detects_missing_files() -> Result<()> {
-        let dir = TempDir::new().map_err(|e| Error::Io(e))?;
+        let dir = TempDir::new().map_err(Error::Io)?;
         let lsm_path = dir.path();
         let active_dir = lsm_path.join("active");
         std::fs::create_dir_all(&active_dir)?;
@@ -443,7 +443,7 @@ mod tests {
 
     #[test]
     fn test_snapshot_validation_detects_checksum_mismatch() -> Result<()> {
-        let dir = TempDir::new().map_err(|e| Error::Io(e))?;
+        let dir = TempDir::new().map_err(Error::Io)?;
         let lsm_path = dir.path();
         let active_dir = lsm_path.join("active");
         std::fs::create_dir_all(&active_dir)?;

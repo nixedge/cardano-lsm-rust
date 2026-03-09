@@ -43,7 +43,7 @@ fn test_insert_after_rollback() {
         "After second compact, expected new value but got old value");
 
     // Final check with range query (like test_98 op 192)
-    let range_results: Vec<_> = tree.range(&key, &Key::from(&[0xFF; 32])).collect();
+    let range_results: Vec<_> = tree.range(&key, &Key::from([0xFF; 32])).collect();
     assert!(!range_results.is_empty(), "Range query should find the key");
 
     let (found_key, found_value) = &range_results[0];

@@ -58,7 +58,7 @@ impl CRC32C {
     }
 
     /// Format as hex string (8 hex digits, lowercase)
-    pub fn to_hex(&self) -> String {
+    pub fn to_hex(self) -> String {
         format!("{:08x}", self.0)
     }
 

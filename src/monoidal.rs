@@ -165,7 +165,7 @@ where
     fn mappend(&self, other: &Self) -> Self {
         let mut result = self.clone();
         for (k, v) in other {
-            let entry = result.entry(k.clone()).or_insert_with(V::default);
+            let entry = result.entry(k.clone()).or_default();
             *entry += v.clone();
         }
         result

@@ -98,7 +98,7 @@ impl SsTableWriter {
             num_entries,
             min_key: min_key.clone(),
             max_key: max_key.clone(),
-            compression: CompressionType::None, // TODO: implement compression
+            compression: CompressionType::None, // Compression not used - blockchain data doesn't compress well
         };
         
         let header_bytes = bincode::serialize(&header)?;
@@ -337,9 +337,9 @@ impl BloomFilter {
         let keys: Vec<_> = keys.collect();
         let num_keys = keys.len().max(1);
         let num_bits = num_keys * bits_per_key;
-        let num_hashes = ((bits_per_key as f64 * 0.69) as usize).max(1).min(30);
+        let num_hashes = ((bits_per_key as f64 * 0.69) as usize).clamp(1, 30);
         
-        let num_words = (num_bits + 63) / 64;
+        let num_words = num_bits.div_ceil(64);
         let mut bits = vec![0u64; num_words];
         
         for key in keys {

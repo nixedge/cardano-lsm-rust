@@ -36,7 +36,7 @@ fn test_haskell_format_structure() -> Result<()> {
     let test_data_path_str = test_data_path.to_str().expect("Invalid path");
 
     let status = Command::new("cabal")
-        .args(&["run", "cross-format-writer", "--", test_data_path_str])
+        .args(["run", "cross-format-writer", "--", test_data_path_str])
         .current_dir("conformance-generator")
         .status()
         .expect("Failed to run Haskell cross-format-writer");

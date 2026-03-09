@@ -67,7 +67,7 @@ impl AtomicFileWriter {
     /// Write data to the file
     pub fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
         self.file.as_mut()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Writer already closed"))?
+            .ok_or_else(|| io::Error::other("Writer already closed"))?
             .write_all(data)
     }
 
@@ -78,7 +78,7 @@ impl AtomicFileWriter {
     pub fn as_writer(&mut self) -> io::Result<&mut dyn Write> {
         self.file.as_mut()
             .map(|f| f as &mut dyn Write)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Writer already closed"))
+            .ok_or_else(|| io::Error::other("Writer already closed"))
     }
 
     /// Commit the file atomically
@@ -92,7 +92,7 @@ impl AtomicFileWriter {
     /// After this, the file is durably on disk.
     pub fn commit(mut self) -> io::Result<()> {
         let mut file = self.file.take()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Writer already closed"))?;
+            .ok_or_else(|| io::Error::other("Writer already closed"))?;
 
         // 1. Flush buffer
         file.flush()?;

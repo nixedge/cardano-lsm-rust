@@ -13,8 +13,10 @@ use std::io;
 
 /// I/O backend configuration
 #[derive(Clone, Debug)]
+#[derive(Default)]
 pub enum IoBackend {
     /// Synchronous I/O (default, all platforms)
+    #[default]
     Sync,
 
     /// Asynchronous I/O using io_uring (Linux only, requires io-uring feature)
@@ -22,12 +24,6 @@ pub enum IoBackend {
     IoUring,
 }
 
-impl Default for IoBackend {
-    fn default() -> Self {
-        // Default to sync I/O for compatibility
-        IoBackend::Sync
-    }
-}
 
 /// Read a file completely using the specified backend
 pub fn read_file(path: &Path, backend: &IoBackend) -> io::Result<Vec<u8>> {

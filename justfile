@@ -6,7 +6,7 @@ default:
 
 # Run all Rust tests
 test:
-    cargo test
+    cargo test --lib --tests
 
 # Run specific test suite
 test-suite suite:

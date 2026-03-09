@@ -3,7 +3,7 @@
 
 use crate::{Key, Value, Result};
 use crate::sstable_new::{SsTableHandle, SsTableWriter, RunNumber};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::collections::BTreeMap;
 use serde::{Serialize, Deserialize};
 
@@ -202,7 +202,7 @@ impl Compactor {
         &self,
         job: LevelCompactionJob,
         source_level_runs: &[SsTableHandle],
-        active_dir: &PathBuf,
+        active_dir: &Path,
         run_number: RunNumber,
         max_level: u8,
     ) -> Result<CompactionResult> {
@@ -218,7 +218,7 @@ impl Compactor {
             let sstable = &source_level_runs[idx];
 
             // Read all entries including tombstones
-            let entries = sstable.range_with_tombstones(&Key::from(b""), &Key::from(&[0xFF; 256]))?;
+            let entries = sstable.range_with_tombstones(&Key::from(b""), &Key::from([0xFF; 256]))?;
 
             for (key, value_opt) in entries {
                 // Later (newer) entries overwrite earlier (older) ones
@@ -233,7 +233,7 @@ impl Compactor {
         if is_bottom_level {
             // Leveling: merge with ALL runs in target level, remove tombstones
             for target_run in &job.target_level_runs {
-                let entries = target_run.range_with_tombstones(&Key::from(b""), &Key::from(&[0xFF; 256]))?;
+                let entries = target_run.range_with_tombstones(&Key::from(b""), &Key::from([0xFF; 256]))?;
 
                 for (key, value_opt) in entries {
                     // Only insert if not already present (source has priority)
@@ -276,7 +276,7 @@ impl Compactor {
     }
 
     /// Execute a compaction job
-    pub fn compact(&self, job: CompactionJob, sstables: &[SsTableHandle], active_dir: &PathBuf, run_number: RunNumber) -> Result<CompactionResult> {
+    pub fn compact(&self, job: CompactionJob, sstables: &[SsTableHandle], active_dir: &Path, run_number: RunNumber) -> Result<CompactionResult> {
         // Collect all entries from input SSTables (including tombstones!)
         let mut all_entries: BTreeMap<Key, Option<Value>> = BTreeMap::new();
 
@@ -289,7 +289,7 @@ impl Compactor {
             let sstable = &sstables[idx];
 
             // Read all entries from this SSTable INCLUDING tombstones
-            let entries = sstable.range_with_tombstones(&Key::from(b""), &Key::from(&[0xFF; 256]))?;
+            let entries = sstable.range_with_tombstones(&Key::from(b""), &Key::from([0xFF; 256]))?;
 
             for (key, value_opt) in entries {
                 // Later (newer) entries overwrite earlier (older) ones (including tombstones)

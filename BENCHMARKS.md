@@ -72,31 +72,7 @@ cargo bench -- --baseline main
 - Snapshot: < 10ms (regardless of size) ⭐ CRITICAL
 - Rollback (any size): < 1s ⭐ CRITICAL
 
-### 5. Merkle Trees (`merkle_ops`)
-
-**Benchmarks:**
-- `merkle_insert` - Insert 1000 entries at heights 8, 16, 20
-- `merkle_prove` - Generate proof for entry
-- `merkle_verify` - Verify proof
-
-**Performance Targets:**
-- Insert: < 100μs per entry ⭐ GOVERNANCE
-- Prove: < 5ms
-- Verify: < 1ms
-
-### 6. Monoidal Operations (`monoidal_ops`)
-
-**Benchmarks:**
-- `monoidal_fold` - Aggregate 100, 1K, 10K u64 values
-- `monoidal_prefix_fold` - Aggregate 1000 entries with prefix
-- `monoidal_asset_aggregation` - Aggregate multi-asset UTXOs
-
-**Performance Targets:**
-- Fold (1K entries): < 10ms ⭐ WALLET BALANCE
-- Fold (10K entries): < 100ms
-- Asset aggregation: < 50ms
-
-### 7. Persistence (`persistence_ops`)
+### 5. Persistence (`persistence_ops`)
 
 **Benchmarks:**
 - `close_and_reopen_10k_entries` - Full persistence cycle
@@ -104,7 +80,7 @@ cargo bench -- --baseline main
 **Performance Targets:**
 - Reopen: < 100ms (WAL replay + SSTable loading)
 
-### 8. Blockchain-Specific (`blockchain_ops`)
+### 6. Blockchain-Specific (`blockchain_ops`)
 
 **Benchmarks:**
 - `utxo_lookup` - Lookup UTXO by tx_hash#index
@@ -116,7 +92,7 @@ cargo bench -- --baseline main
 - Block processing (100 txs): < 50ms ⭐ LIVE SYNC
 - Chain reorg (10 blocks): < 1s ⭐ REORG HANDLING
 
-### 9. Throughput (`throughput_ops`)
+### 7. Throughput (`throughput_ops`)
 
 **Benchmarks:**
 - `sequential_writes_100k` - Bulk insert throughput
@@ -136,8 +112,6 @@ cargo bench -- --baseline main
 | Range (100) | < 1ms | Address queries |
 | Snapshot | < 10ms | Every block |
 | Rollback | < 1s | Chain reorg |
-| Merkle insert | < 100μs | Governance |
-| Monoidal fold (1K) | < 10ms | Wallet balance |
 | Block processing | < 50ms | Live sync |
 
 ## Interpreting Results
@@ -290,8 +264,6 @@ Based on the implementation:
 
 ### Medium Operations (ms range)
 - ✅ Range scan (100): ~0.5-2ms
-- ✅ Merkle insert: ~10-50μs
-- ✅ Monoidal fold (1K): ~5-15ms
 - ✅ Rollback: ~10-100ms
 
 ### Slow Operations (100ms+ range)
@@ -305,15 +277,6 @@ Based on the implementation:
 - Lookup: < 10μs ✅
 - Insert: < 10μs ✅
 - Scan address: < 10ms for 1000 UTXOs ✅
-
-### Governance
-- Index action + Merkle: < 100μs ✅
-- Verify proof: < 1ms ✅
-- Critical for democracy! ⚖️
-
-### Balance Queries
-- Single address: < 1μs ✅
-- Total wallet (monoidal): < 10ms for 1000 addresses ✅
 
 ### Chain Reorg
 - Snapshot per block: < 10ms ✅
@@ -346,20 +309,12 @@ If benchmarks show issues:
 
 ## Success Criteria
 
-Before production:
-- [ ] All benchmarks run without errors
-- [ ] All critical paths meet targets
-- [ ] No performance regressions
-- [ ] Blockchain benchmarks < 50ms
-- [ ] Snapshot < 10ms
-- [ ] Rollback < 1s
+Core LSM operations meet target performance requirements:
+- Insert/delete: < 10μs
+- Get operations: < 10μs (hit), < 1μs (miss with bloom filter)
+- Range scans: < 1ms for 100 entries
+- Snapshots: < 10ms
+- Rollback: < 1s
+- Block processing: < 50ms
 
-## Next Steps
-
-1. Run benchmarks: `cargo bench`
-2. Review results
-3. Identify bottlenecks
-4. Optimize if needed
-5. Rerun and compare
-
-Benchmarks ready to run! 🚀
+Run benchmarks with `cargo bench` to verify performance on your hardware.

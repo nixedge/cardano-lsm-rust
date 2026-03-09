@@ -96,10 +96,10 @@ impl SsTableWriter {
 
         // Create temporary files for writing
         let keyops_writer = ChecksumHandle::create(&paths.keyops)
-            .map_err(|e| Error::Io(e))?;
+            .map_err(Error::Io)?;
 
         let blobs_writer = ChecksumHandle::create(&paths.blobs)
-            .map_err(|e| Error::Io(e))?;
+            .map_err(Error::Io)?;
 
         Ok(Self {
             run_number,
@@ -290,22 +290,22 @@ impl SsTableHandle {
 
         // Verify keyops checksum
         let keyops_expected = crate::checksum::get_checksum(&checksums, "keyops")
-            .map_err(|e| Error::Corruption(e))?;
+            .map_err(Error::Corruption)?;
         crate::checksum::check_crc(&paths.keyops, keyops_expected)?;
 
         // Verify blobs checksum
         let blobs_expected = crate::checksum::get_checksum(&checksums, "blobs")
-            .map_err(|e| Error::Corruption(e))?;
+            .map_err(Error::Corruption)?;
         crate::checksum::check_crc(&paths.blobs, blobs_expected)?;
 
         // Verify filter checksum
         let filter_expected = crate::checksum::get_checksum(&checksums, "filter")
-            .map_err(|e| Error::Corruption(e))?;
+            .map_err(Error::Corruption)?;
         crate::checksum::check_crc(&paths.filter, filter_expected)?;
 
         // Verify index checksum
         let index_expected = crate::checksum::get_checksum(&checksums, "index")
-            .map_err(|e| Error::Corruption(e))?;
+            .map_err(Error::Corruption)?;
         crate::checksum::check_crc(&paths.index, index_expected)?;
 
         // All checksums verified, now read the data
@@ -497,12 +497,12 @@ impl SsTableHandle {
         let components = ["keyops", "blobs", "filter", "index", "checksums"];
 
         for component in &components {
-            let source = match component {
-                &"keyops" => &self.paths.keyops,
-                &"blobs" => &self.paths.blobs,
-                &"filter" => &self.paths.filter,
-                &"index" => &self.paths.index,
-                &"checksums" => &self.paths.checksums,
+            let source = match *component {
+                "keyops" => &self.paths.keyops,
+                "blobs" => &self.paths.blobs,
+                "filter" => &self.paths.filter,
+                "index" => &self.paths.index,
+                "checksums" => &self.paths.checksums,
                 _ => unreachable!(),
             };
 
@@ -563,8 +563,7 @@ impl SsTableHandle {
         }
 
         if !errors.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
+            return Err(io::Error::other(
                 format!("Failed to delete SSTable files: {}", errors.join(", ")),
             ));
         }
@@ -622,7 +621,7 @@ impl BloomFilter {
         let num_bits = keys_vec.len() * bits_per_key;
         let num_hashes = 7; // Optimal for 0.01 FPR
 
-        let mut bits = vec![0u8; (num_bits + 7) / 8];
+        let mut bits = vec![0u8; num_bits.div_ceil(8)];
 
         for key in keys_vec {
             for i in 0..num_hashes {
@@ -668,7 +667,7 @@ mod tests {
 
     #[test]
     fn test_bloom_filter() {
-        let keys = vec![b"key1", b"key2", b"key3"];
+        let keys = [b"key1", b"key2", b"key3"];
         let bloom = BloomFilter::from_keys(keys.iter().map(|k| k.as_ref()), 10, 0.01);
 
         assert!(bloom.might_contain(b"key1"));
@@ -694,7 +693,7 @@ mod tests {
 
     #[test]
     fn test_sstable_write_read() -> Result<()> {
-        let dir = TempDir::new().map_err(|e| Error::Io(e))?;
+        let dir = TempDir::new().map_err(Error::Io)?;
         let active_dir = dir.path();
 
         // Write SSTable
@@ -727,7 +726,7 @@ mod tests {
 
     #[test]
     fn test_hard_link_shares_data() -> Result<()> {
-        let dir = TempDir::new().map_err(|e| Error::Io(e))?;
+        let dir = TempDir::new().map_err(Error::Io)?;
         let active_dir = dir.path().join("active");
         let snapshot_dir = dir.path().join("snapshots/snap1");
 
@@ -741,7 +740,7 @@ mod tests {
 
         // Hard-link to snapshot directory
         let handle2 = handle1.hard_link_to(&snapshot_dir, 100)
-            .map_err(|e| Error::Io(e))?;
+            .map_err(Error::Io)?;
 
         // Both sets of files should exist
         let paths1 = RunPaths::new(&active_dir, 1);
@@ -776,7 +775,7 @@ mod tests {
 
     #[test]
     fn test_refcount_tracks_clones() -> Result<()> {
-        let dir = TempDir::new().map_err(|e| Error::Io(e))?;
+        let dir = TempDir::new().map_err(Error::Io)?;
         let active_dir = dir.path();
 
         // Create SSTable
@@ -799,7 +798,7 @@ mod tests {
 
     #[test]
     fn test_multiple_hard_links() -> Result<()> {
-        let dir = TempDir::new().map_err(|e| Error::Io(e))?;
+        let dir = TempDir::new().map_err(Error::Io)?;
         let active_dir = dir.path().join("active");
         std::fs::create_dir_all(&active_dir)?;
 
@@ -814,11 +813,11 @@ mod tests {
         let snap3_dir = dir.path().join("snap3");
 
         let handle2 = handle1.hard_link_to(&snap1_dir, 100)
-            .map_err(|e| Error::Io(e))?;
+            .map_err(Error::Io)?;
         let handle3 = handle1.hard_link_to(&snap2_dir, 200)
-            .map_err(|e| Error::Io(e))?;
+            .map_err(Error::Io)?;
         let handle4 = handle1.hard_link_to(&snap3_dir, 300)
-            .map_err(|e| Error::Io(e))?;
+            .map_err(Error::Io)?;
 
         // Refcount should be 4
         assert_eq!(handle1.refcount.load(Ordering::SeqCst), 4);

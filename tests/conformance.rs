@@ -12,12 +12,15 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+use base64::{Engine as _, engine::general_purpose};
 
 // ===== Test Case Format =====
 
 #[derive(Debug, Deserialize)]
 struct TestCase {
+    #[allow(dead_code)]
     seed: u64,
+    #[allow(dead_code)]
     version: String,
     config: TestConfig,
     operations: Vec<Operation>,
@@ -127,8 +130,8 @@ impl TestRunner {
     fn execute_operation(&mut self, op: &Operation) -> OperationResult {
         match op {
             Operation::Insert { key, value } => {
-                let key_bytes = base64::decode(key).expect("Invalid base64 key");
-                let value_bytes = base64::decode(value).expect("Invalid base64 value");
+                let key_bytes = general_purpose::STANDARD.decode(key).expect("Invalid base64 key");
+                let value_bytes = general_purpose::STANDARD.decode(value).expect("Invalid base64 value");
 
                 match self.tree.insert(&Key::from(&key_bytes), &Value::from(&value_bytes)) {
                     Ok(()) => OperationResult::OkUnit(None),
@@ -137,7 +140,7 @@ impl TestRunner {
             }
 
             Operation::Delete { key } => {
-                let key_bytes = base64::decode(key).expect("Invalid base64 key");
+                let key_bytes = general_purpose::STANDARD.decode(key).expect("Invalid base64 key");
 
                 match self.tree.delete(&Key::from(&key_bytes)) {
                     Ok(()) => OperationResult::OkUnit(None),
@@ -146,12 +149,12 @@ impl TestRunner {
             }
 
             Operation::Get { key } => {
-                let key_bytes = base64::decode(key).expect("Invalid base64 key");
+                let key_bytes = general_purpose::STANDARD.decode(key).expect("Invalid base64 key");
 
                 match self.tree.get(&Key::from(&key_bytes)) {
                     Ok(Some(value)) => {
                         // Encode value as base64
-                        let encoded = base64::encode(value.as_ref());
+                        let encoded = general_purpose::STANDARD.encode(value.as_ref());
                         OperationResult::Ok(Some(encoded))
                     }
                     Ok(None) => OperationResult::Ok(None),
@@ -166,15 +169,15 @@ impl TestRunner {
             }
 
             Operation::Range { from, to } => {
-                let from_bytes = base64::decode(from).expect("Invalid base64 from key");
-                let to_bytes = base64::decode(to).expect("Invalid base64 to key");
+                let from_bytes = general_purpose::STANDARD.decode(from).expect("Invalid base64 from key");
+                let to_bytes = general_purpose::STANDARD.decode(to).expect("Invalid base64 to key");
 
                 // range() returns an iterator directly, not a Result
                 let entries: Vec<(String, String)> = self.tree
                     .range(&Key::from(&from_bytes), &Key::from(&to_bytes))
                     .map(|(k, v)| {
-                        let key_b64 = base64::encode(k.as_ref());
-                        let value_b64 = base64::encode(v.as_ref());
+                        let key_b64 = general_purpose::STANDARD.encode(k.as_ref());
+                        let value_b64 = general_purpose::STANDARD.encode(v.as_ref());
                         (key_b64, value_b64)
                     })
                     .collect();
@@ -417,7 +420,7 @@ fn conformance_tests() {
         println!("This may take a minute...");
 
         let status = std::process::Command::new("just")
-            .args(&["gen-conformance", "100"])
+            .args(["gen-conformance", "100"])
             .status()
             .expect("Failed to run 'just gen-conformance'. Is just installed?");
 

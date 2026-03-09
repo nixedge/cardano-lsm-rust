@@ -4,7 +4,6 @@
 
 use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
-use blake3;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NodePath {
@@ -157,10 +156,10 @@ impl IncrementalMerkleTree {
             let sibling_hash = self.nodes
                 .get(&sibling_path)
                 .map(|n| n.hash.clone())
-                .unwrap_or_else(|| Hash::empty());
+                .unwrap_or_else(Hash::empty);
             
             // Determine direction
-            let direction = if current_index % 2 == 0 {
+            let direction = if current_index.is_multiple_of(2) {
                 Direction::Right
             } else {
                 Direction::Left
@@ -169,7 +168,7 @@ impl IncrementalMerkleTree {
             siblings.push((direction.clone(), sibling_hash.clone()));
             
             // Compute parent hash
-            current_hash = if current_index % 2 == 0 {
+            current_hash = if current_index.is_multiple_of(2) {
                 Hash::hash_node(&current_hash, &sibling_hash)
             } else {
                 Hash::hash_node(&sibling_hash, &current_hash)
@@ -213,7 +212,7 @@ impl IncrementalMerkleTree {
             let sibling_hash = self.nodes
                 .get(&sibling_path)
                 .map(|n| n.hash.clone())
-                .unwrap_or_else(|| Hash::empty());
+                .unwrap_or_else(Hash::empty);
             
             let direction = if current_index % 2 == 0 {
                 Direction::Right

@@ -5,7 +5,7 @@ use tempfile::TempDir;
 
 #[test]
 fn test_insert_batch() -> Result<()> {
-    let dir = TempDir::new().map_err(|e| cardano_lsm::Error::Io(e))?;
+    let dir = TempDir::new().map_err(cardano_lsm::Error::Io)?;
     let config = LsmConfig::default();
     let mut tree = LsmTree::open(dir.path(), config)?;
 
@@ -31,7 +31,7 @@ fn test_insert_batch() -> Result<()> {
 
 #[test]
 fn test_get_batch() -> Result<()> {
-    let dir = TempDir::new().map_err(|e| cardano_lsm::Error::Io(e))?;
+    let dir = TempDir::new().map_err(cardano_lsm::Error::Io)?;
     let config = LsmConfig::default();
     let mut tree = LsmTree::open(dir.path(), config)?;
 
@@ -76,7 +76,7 @@ fn test_get_batch() -> Result<()> {
 
 #[test]
 fn test_delete_batch() -> Result<()> {
-    let dir = TempDir::new().map_err(|e| cardano_lsm::Error::Io(e))?;
+    let dir = TempDir::new().map_err(cardano_lsm::Error::Io)?;
     let config = LsmConfig::default();
     let mut tree = LsmTree::open(dir.path(), config)?;
 
@@ -118,7 +118,7 @@ fn test_delete_batch() -> Result<()> {
 
 #[test]
 fn test_batch_operations_empty() -> Result<()> {
-    let dir = TempDir::new().map_err(|e| cardano_lsm::Error::Io(e))?;
+    let dir = TempDir::new().map_err(cardano_lsm::Error::Io)?;
     let config = LsmConfig::default();
     let mut tree = LsmTree::open(dir.path(), config)?;
 
@@ -133,7 +133,7 @@ fn test_batch_operations_empty() -> Result<()> {
 
 #[test]
 fn test_batch_operations_performance() -> Result<()> {
-    let dir = TempDir::new().map_err(|e| cardano_lsm::Error::Io(e))?;
+    let dir = TempDir::new().map_err(cardano_lsm::Error::Io)?;
     let config = LsmConfig::default();
     let mut tree = LsmTree::open(dir.path(), config)?;
 
@@ -170,7 +170,7 @@ fn test_batch_operations_performance() -> Result<()> {
 
 #[test]
 fn test_batch_with_duplicates() -> Result<()> {
-    let dir = TempDir::new().map_err(|e| cardano_lsm::Error::Io(e))?;
+    let dir = TempDir::new().map_err(cardano_lsm::Error::Io)?;
     let config = LsmConfig::default();
     let mut tree = LsmTree::open(dir.path(), config)?;
 

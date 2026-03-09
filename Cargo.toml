@@ -5,7 +5,7 @@ edition = "2021"
 authors = ["Cardano LSM Contributors"]
 license = "Apache-2.0"
 description = "Pure Rust port of Cardano's LSM tree for blockchain indexing"
-repository = "https://github.com/yourusername/cardano-lsm-rust"
+repository = "https://github.com/nixedge/cardano-lsm-rust"
 keywords = ["lsm", "database", "cardano", "blockchain", "storage"]
 categories = ["database-implementations", "data-structures"]
 

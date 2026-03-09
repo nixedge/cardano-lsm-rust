@@ -1,0 +1,8 @@
+cardano-lsm
+Copyright 2025 NixEdge, LLC
+
+This product includes software developed by NixEdge, LLC.
+
+This is a pure Rust port of the Cardano LSM tree implementation,
+originally developed in Haskell by Input Output Global, Inc. (IOG)
+for the Cardano blockchain indexing system.

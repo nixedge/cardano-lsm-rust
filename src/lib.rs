@@ -61,6 +61,7 @@ impl Key {
         Key(bytes.as_ref().to_vec())
     }
     
+    #[allow(clippy::should_implement_trait)]
     pub fn as_ref(&self) -> &[u8] {
         &self.0
     }
@@ -528,7 +529,7 @@ impl LsmTree {
             for level in levels.iter() {
                 // Sort SSTables by run_number in DESCENDING order (newest first)
                 let mut sorted_sstables: Vec<&crate::sstable_new::SsTableHandle> = level.iter().collect();
-                sorted_sstables.sort_by(|a, b| b.run_number().cmp(&a.run_number()));
+                sorted_sstables.sort_by_key(|b| std::cmp::Reverse(b.run_number()));
 
                 for sstable in sorted_sstables {
                     // Check if key could be in this SSTable
@@ -646,7 +647,7 @@ impl LsmTree {
                 // Sort SSTables by run_number in ASCENDING order (oldest first)
                 // so newer values can overwrite older ones with .insert()
                 let mut sorted_sstables: Vec<&crate::sstable_new::SsTableHandle> = level.iter().collect();
-                sorted_sstables.sort_by(|a, b| a.run_number().cmp(&b.run_number()));
+                sorted_sstables.sort_by_key(|a| a.run_number());
 
                 for sstable in sorted_sstables {
                     // Use range_with_tombstones to include deletions in the merge
@@ -713,7 +714,7 @@ impl LsmTree {
     }
     
     pub fn iter(&self) -> RangeIter {
-        self.range(&Key::from(b""), &Key::from(&[0xFF; 256]))
+        self.range(&Key::from(b""), &Key::from([0xFF; 256]))
     }
     
     pub fn flush(&self) -> Result<()> {
@@ -1005,7 +1006,7 @@ impl LsmTree {
     pub fn delete_snapshot(&self, name: &str) -> Result<()> {
         let snapshot = PersistentSnapshot::load(&self.path, name)?;
         snapshot.delete()
-            .map_err(|e| Error::Io(e))
+            .map_err(Error::Io)
     }
 }
 
@@ -1098,7 +1099,7 @@ impl LsmSnapshot {
         // Collect from SSTables (all levels, lowest priority)
         for level in self.levels.iter().rev() {
             for sstable in level {
-                if let Ok(sstable_entries) = sstable.range(&Key::from(b""), &Key::from(&[0xFF; 256])) {
+                if let Ok(sstable_entries) = sstable.range(&Key::from(b""), &Key::from([0xFF; 256])) {
                     for (k, v) in sstable_entries {
                         entries.entry(k).or_insert(v);
                     }
