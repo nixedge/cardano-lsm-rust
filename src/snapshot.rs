@@ -52,8 +52,8 @@ impl PersistentSnapshot {
     /// Create a new snapshot by hard-linking SSTables
     ///
     /// This:
-    /// 1. Creates snapshots/<name>/ directory
-    /// 2. Hard-links all SSTable files from active/ to snapshots/<name>/
+    /// 1. Creates `snapshots/<name>/` directory
+    /// 2. Hard-links all SSTable files from `active/` to `snapshots/<name>/`
     /// 3. Writes snapshot metadata in CBOR format
     /// 4. Writes metadata checksum
     /// 5. Fsyncs everything

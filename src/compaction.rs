@@ -1,5 +1,12 @@
-// Compaction strategies for LSM tree
-// Implements Tiered, Leveled, and Hybrid compaction
+//! Compaction strategies for LSM tree
+//!
+//! This module implements three compaction strategies:
+//! - **Tiered**: Merges SSTables of similar size, optimized for write-heavy workloads
+//! - **Leveled**: Organizes SSTables into levels, optimized for read-heavy workloads
+//! - **LazyLevelling** (Hybrid): Uses tiering for L0 to L(max-1), leveling for L(max)
+//!
+//! The LazyLevelling policy is the recommended strategy for blockchain indexing,
+//! balancing write amplification and space amplification.
 
 use crate::{Key, Value, Result};
 use crate::sstable_new::{SsTableHandle, SsTableWriter, RunNumber};
@@ -7,24 +14,52 @@ use std::path::{Path, PathBuf};
 use std::collections::BTreeMap;
 use serde::{Serialize, Deserialize};
 
+/// Compaction strategy for the LSM tree
+///
+/// Determines how SSTables are merged during compaction to maintain performance
+/// and manage disk space usage.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum CompactionStrategy {
+    /// Tiered compaction: merges SSTables of similar size
+    ///
+    /// Best for write-heavy workloads. Groups SSTables into size tiers
+    /// and merges within each tier when enough tables accumulate.
     Tiered {
+        /// Maximum size ratio between SSTables in the same tier (e.g., 2.0 = within 2x size)
         size_ratio: f64,
+        /// Minimum number of SSTables required before triggering compaction
         min_merge_width: usize,
+        /// Maximum number of SSTables to merge in one compaction operation
         max_merge_width: usize,
     },
+    /// Leveled compaction: organizes SSTables into fixed-size levels
+    ///
+    /// Best for read-heavy workloads. Each level has a target size,
+    /// and SSTables are compacted level-by-level.
     Leveled {
+        /// Size multiplier between levels (e.g., 10.0 = each level is 10x larger)
         size_ratio: f64,
+        /// Maximum number of levels in the tree
         max_level: u8,
     },
+    /// Hybrid compaction: combines tiering and leveling
+    ///
+    /// Uses one strategy for early levels and another for later levels.
+    /// LazyLevelling uses tiering for L0 to L(max-1) and leveling for L(max).
     Hybrid {
+        /// Strategy for initial levels (typically tiering)
         l0_strategy: Box<CompactionStrategy>,
+        /// Strategy for later levels (typically leveling)
         ln_strategy: Box<CompactionStrategy>,
+        /// Level at which to transition between strategies
         transition_level: u8,
     },
 }
 
+/// Compaction manager for the LSM tree
+///
+/// Selects which SSTables need compaction and executes merge operations
+/// according to the configured [`CompactionStrategy`].
 pub struct Compactor {
     #[allow(dead_code)]
     strategy: CompactionStrategy,
@@ -33,14 +68,33 @@ pub struct Compactor {
 }
 
 impl Compactor {
+    /// Creates a new compactor with the specified strategy
+    ///
+    /// # Arguments
+    ///
+    /// * `strategy` - The compaction strategy to use (Tiered, Leveled, or Hybrid)
+    /// * `base_path` - Base directory path for SSTable storage
     pub fn new(strategy: CompactionStrategy, base_path: PathBuf) -> Self {
         Self {
             strategy,
             base_path,
         }
     }
-    
-    /// Select which SSTables need compaction
+
+    /// Selects which SSTables need compaction based on the configured strategy
+    ///
+    /// Analyzes the current set of SSTables and determines if compaction is needed.
+    /// Returns `None` if no compaction is required, or `Some(CompactionJob)` with
+    /// the indices of SSTables to merge.
+    ///
+    /// # Arguments
+    ///
+    /// * `sstables` - Slice of all active SSTables to consider for compaction
+    ///
+    /// # Returns
+    ///
+    /// `Option<CompactionJob>` describing which SSTables to compact, or `None` if
+    /// no compaction is needed yet.
     #[allow(dead_code)]
     pub fn select_compaction(&self, sstables: &[SsTableHandle]) -> Option<CompactionJob> {
         match &self.strategy {
@@ -337,27 +391,47 @@ impl Compactor {
     }
 }
 
+/// Compaction job specification
+///
+/// Describes which SSTables should be merged together during compaction.
+/// Returned by [`Compactor::select_compaction`] when compaction is needed.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct CompactionJob {
-    pub inputs: Vec<usize>, // Indices of SSTables to compact
+    /// Indices of SSTables to compact (refers to positions in the input slice)
+    pub inputs: Vec<usize>,
+    /// Strategy used to select this compaction
     pub strategy: CompactionStrategy,
 }
 
 /// Level-based compaction job for LazyLevelling policy
+///
+/// Describes a compaction operation that moves data from one level to another,
+/// used by the LazyLevelling strategy.
 #[derive(Debug, Clone)]
 pub struct LevelCompactionJob {
+    /// Source level number (0-indexed)
     pub source_level: u8,
+    /// Target level number where compacted data will be written
     pub target_level: u8,
-    pub source_runs: Vec<usize>, // Indices within source level
-    pub target_level_runs: Vec<SsTableHandle>, // All runs in target level for overlap detection
+    /// Indices of runs within the source level to compact
+    pub source_runs: Vec<usize>,
+    /// All runs in the target level (for overlap detection in leveling policy)
+    pub target_level_runs: Vec<SsTableHandle>,
 }
 
+/// Result of a compaction operation
+///
+/// Contains the newly created SSTable (if any) and metadata about the operation.
 #[allow(dead_code)]
 pub struct CompactionResult {
+    /// Handle to the newly created merged SSTable, or `None` if all entries were tombstones
     pub output: Option<SsTableHandle>,
+    /// Indices of input SSTables that should be deleted after compaction
     pub inputs_to_remove: Vec<usize>,
+    /// Total bytes read from input SSTables during compaction
     pub bytes_read: u64,
+    /// Total bytes written to the output SSTable
     pub bytes_written: u64,
 }
 
