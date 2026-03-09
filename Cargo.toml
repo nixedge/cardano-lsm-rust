@@ -1,11 +1,14 @@
 [package]
 name = "cardano-lsm"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 authors = ["Cardano LSM Contributors"]
 license = "Apache-2.0"
 description = "Pure Rust port of Cardano's LSM tree for blockchain indexing"
 repository = "https://github.com/nixedge/cardano-lsm-rust"
+homepage = "https://github.com/nixedge/cardano-lsm-rust"
+documentation = "https://docs.rs/cardano-lsm"
+readme = "README.md"
 keywords = ["lsm", "database", "cardano", "blockchain", "storage"]
 categories = ["database-implementations", "data-structures"]
 
