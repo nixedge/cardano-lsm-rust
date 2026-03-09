@@ -78,7 +78,7 @@ cargo bench -- --baseline main
 - `close_and_reopen_10k_entries` - Full persistence cycle
 
 **Performance Targets:**
-- Reopen: < 100ms (WAL replay + SSTable loading)
+- Reopen: < 100ms (SSTable loading and metadata reconstruction)
 
 ### 6. Blockchain-Specific (`blockchain_ops`)
 

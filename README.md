@@ -12,9 +12,8 @@ This library implements a Log-Structured Merge (LSM) tree optimized for Cardano 
 - **Cheap Snapshots** - Reference-counted snapshots for instant rollback (critical for blockchain reorgs)
 - **Optimized Compaction** - Hybrid tiered/leveled strategy for blockchain write patterns
 - **High-Performance I/O** - Optional io_uring support for batched concurrent reads on Linux
-- **Crash Recovery** - Write-ahead log with checksums
 - **Conformance Tested** - 10,000+ property-based tests validating compatibility with Haskell reference implementation
-- **No RocksDB** - Avoids historical corruption issues
+- **Bloom Filters** - Fast negative lookups to skip non-existent keys
 
 ## Why This LSM Tree?
 
@@ -32,14 +31,17 @@ The Cardano team developed their own LSM tree implementation in Haskell after ex
 ```
 cardano-lsm-rust/
 ├── src/
-│   └── lib.rs              # Core types and trait definitions
+│   ├── lib.rs                     # Core LSM tree implementation
+│   ├── sstable_new.rs             # SSTable format and I/O
+│   ├── compaction.rs              # Compaction strategies
+│   ├── snapshot.rs                # Snapshot functionality
+│   └── ...                        # Supporting modules
 ├── tests/
-│   ├── test_basic_operations.rs   # Insert, get, delete, iteration
-│   ├── test_range_queries.rs      # Range scans and prefix queries
-│   ├── test_compaction.rs         # Compaction correctness
-│   ├── test_wal_recovery.rs       # WAL and crash recovery
-│   ├── test_snapshots.rs          # Snapshots and rollback
-│   └── conformance.rs             # 10,000+ conformance tests vs Haskell reference
+│   ├── conformance.rs             # 10,000+ conformance tests vs Haskell reference
+│   ├── test_rollback_insert.rs    # Rollback testing
+│   ├── test_snapshot_restoration.rs  # Snapshot save/restore
+│   ├── batch_operations.rs        # Batch insert/delete operations
+│   └── cross_format.rs            # Cross-format validation with Haskell
 ├── benches/
 │   └── lsm_benchmarks.rs          # Performance benchmarks
 ├── Cargo.toml
@@ -48,14 +50,14 @@ cardano-lsm-rust/
 
 ## Development Status
 
-**Current Version**: 0.1.0
+**Current Version**: 1.0.0
 
 This implementation is complete and production-ready:
 
 - ✅ **Core LSM implementation** - All basic operations working
 - ✅ **Snapshots and rollback** - Fast, reference-counted snapshots
-- ✅ **Compaction strategies** - Tiered, leveled, and hybrid
-- ✅ **Crash recovery** - WAL with checksums
+- ✅ **Compaction strategies** - Tiered, leveled, and hybrid (LazyLevelling policy)
+- ✅ **Bloom filters** - Fast negative lookups for non-existent keys
 - ✅ **Conformance tested** - 10,000+ property-based tests passing (100% pass rate)
 
 ### Conformance Testing

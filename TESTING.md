@@ -7,14 +7,11 @@
 cargo test
 
 # Run specific test file
-cargo test --test test_basic_operations
-cargo test --test test_range_queries
-cargo test --test test_compaction
-cargo test --test test_wal_recovery
-cargo test --test test_snapshots
-
-# Run conformance tests (Haskell compatibility validation)
 cargo test --test conformance
+cargo test --test test_rollback_insert
+cargo test --test test_snapshot_restoration
+cargo test --test batch_operations
+cargo test --test cross_format
 
 # Run a single test
 cargo test test_single_insert_and_lookup
@@ -29,13 +26,14 @@ cargo test --release
 ## Test Status
 
 All core LSM functionality is complete and tested:
-- MemTable, SSTables, WAL, and Persistence
+- MemTable, SSTables, and Persistence
 - Range queries and prefix scanning
-- WAL recovery and crash recovery
 - Snapshots and rollback
-- Compaction (tiered, leveled, and hybrid strategies)
+- Compaction (tiered, leveled, and hybrid strategies with LazyLevelling)
+- Batch operations
+- Cross-format validation with Haskell
 
-**Note**: Incremental Merkle trees and monoidal values are not implemented as they're not required for the core LSM functionality.
+**Note**: Incremental Merkle trees and monoidal values are not implemented as they're not required for the core LSM functionality. Write-Ahead Log (WAL) is also not implemented in this version.
 
 ## Conformance Testing
 
@@ -70,36 +68,38 @@ Results: 10,000/10,000 tests passing (100% pass rate)
    println!("Inserting {:?} -> {:?}", key, value);
    ```
 
-2. **Check WAL**:
-   ```rust
-   // Check WAL is being written
-   println!("WAL size: {}", self.wal_size()?);
-   ```
-
-3. **Check SSTable**:
+2. **Check SSTable**:
    ```rust
    // Check SSTables are being created
-   println!("SSTable count: {}", self.sstables.read().unwrap().len());
+   println!("SSTable count: {}", self.levels.read().unwrap().iter().map(|l| l.len()).sum::<usize>());
+   ```
+
+3. **Check Sequence Numbers**:
+   ```rust
+   // Check sequence numbers are incrementing
+   println!("Sequence number: {}", self.sequence_number.read().unwrap());
    ```
 
 ### If test_persistence fails:
 
 1. **Verify SSTable files exist**:
    ```bash
-   ls -lh /tmp/test-*/sstables/
+   ls -lh /tmp/test-*/active/
    ```
 
-2. **Check SSTable can be read**:
+2. **Check SSTables can be read**:
    ```rust
    // Add to test
-   let sstables = tree.sstables.read().unwrap();
-   println!("Loaded {} SSTables", sstables.len());
+   let levels = tree.levels.read().unwrap();
+   println!("Loaded {} levels with {} total SSTables",
+            levels.len(),
+            levels.iter().map(|l| l.len()).sum::<usize>());
    ```
 
-3. **Verify WAL replay**:
+3. **Verify snapshot restoration**:
    ```rust
-   // Check sequence numbers
-   println!("Sequence number after recovery: {}", tree.sequence_number.read().unwrap());
+   // Check snapshot files
+   println!("Snapshots directory: {:?}", tree.snapshots_dir);
    ```
 
 ### If test_compaction fails:
