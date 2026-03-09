@@ -639,20 +639,22 @@ impl LsmTree {
         // Collect all entries from all levels
         let mut entries: BTreeMap<Key, Option<Value>> = BTreeMap::new();
 
-        // From SSTables (lowest level first, then newest SSTables within each level)
+        // From SSTables (lowest level first, then oldest SSTables within each level)
         {
             let levels = self.levels.read().unwrap();
             for level in levels.iter().rev() {
-                // Sort SSTables by run_number in DESCENDING order (newest first)
-                // so newer values overwrite older ones
+                // Sort SSTables by run_number in ASCENDING order (oldest first)
+                // so newer values can overwrite older ones with .insert()
                 let mut sorted_sstables: Vec<&crate::sstable_new::SsTableHandle> = level.iter().collect();
-                sorted_sstables.sort_by(|a, b| b.run_number().cmp(&a.run_number()));
+                sorted_sstables.sort_by(|a, b| a.run_number().cmp(&b.run_number()));
 
                 for sstable in sorted_sstables {
-                    match sstable.range(from, to) {
+                    // Use range_with_tombstones to include deletions in the merge
+                    match sstable.range_with_tombstones(from, to) {
                         Ok(sstable_entries) => {
                             for (k, v) in sstable_entries {
-                                entries.entry(k).or_insert(v);
+                                // Use .insert() to let newer values overwrite older ones
+                                entries.insert(k, v);
                             }
                         }
                         Err(e) => {
