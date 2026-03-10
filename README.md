@@ -32,7 +32,7 @@ The Cardano team developed their own LSM tree implementation in Haskell after ex
 cardano-lsm-rust/
 ├── src/
 │   ├── lib.rs                      # Core LSM tree implementation
-│   ├── sstable_new.rs              # SSTable format and I/O
+│   ├── sstable.rs                  # SSTable format and I/O
 │   ├── compaction.rs               # Compaction strategies
 │   ├── snapshot.rs                 # Snapshot functionality
 │   ├── io_backend.rs               # I/O abstraction (sync/io_uring)
