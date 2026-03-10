@@ -195,7 +195,6 @@ mod checksum_handle;
 mod session_lock;
 mod snapshot;
 mod sstable;
-mod sstable_new;  // New Haskell-format SSTable (will replace sstable.rs)
 mod compaction;
 mod merkle;
 mod monoidal;
@@ -205,7 +204,7 @@ use std::path::{Path, PathBuf};
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 use serde::{Serialize, Deserialize};
-use sstable_new::{SsTableWriter, SsTableHandle, RunNumber};
+use sstable::{SsTableWriter, SsTableHandle, RunNumber};
 use compaction::Compactor;
 use atomic_file::fsync_directory;
 use session_lock::SessionLock;
@@ -716,7 +715,7 @@ impl LsmTree {
             let levels = self.levels.read().unwrap();
             for level in levels.iter() {
                 // Sort SSTables by run_number in DESCENDING order (newest first)
-                let mut sorted_sstables: Vec<&crate::sstable_new::SsTableHandle> = level.iter().collect();
+                let mut sorted_sstables: Vec<&crate::sstable::SsTableHandle> = level.iter().collect();
                 sorted_sstables.sort_by_key(|b| std::cmp::Reverse(b.run_number()));
 
                 for sstable in sorted_sstables {
@@ -834,7 +833,7 @@ impl LsmTree {
             for level in levels.iter().rev() {
                 // Sort SSTables by run_number in ASCENDING order (oldest first)
                 // so newer values can overwrite older ones with .insert()
-                let mut sorted_sstables: Vec<&crate::sstable_new::SsTableHandle> = level.iter().collect();
+                let mut sorted_sstables: Vec<&crate::sstable::SsTableHandle> = level.iter().collect();
                 sorted_sstables.sort_by_key(|a| a.run_number());
 
                 for sstable in sorted_sstables {

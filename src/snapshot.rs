@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::io;
 use serde::{Serialize, Deserialize};
 
-use crate::sstable_new::{SsTableHandle, RunNumber};
+use crate::sstable::{SsTableHandle, RunNumber};
 use crate::atomic_file::{AtomicFileWriter, fsync_directory};
 use crate::checksum::CRC32C;
 use crate::{Result, Error, LsmConfig};
@@ -175,7 +175,7 @@ impl PersistentSnapshot {
     ///
     /// Returns detailed error information about which files are missing.
     pub fn validate(&self) -> Result<()> {
-        use crate::sstable_new::RunPaths;
+        use crate::sstable::RunPaths;
 
         for run in &self.metadata.runs {
             let paths = RunPaths::new(&self.path, run.run_number);
@@ -274,7 +274,7 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
     use crate::{Key, Value};
-    use crate::sstable_new::SsTableWriter;
+    use crate::sstable::SsTableWriter;
 
     #[test]
     fn test_create_and_load_snapshot() -> Result<()> {

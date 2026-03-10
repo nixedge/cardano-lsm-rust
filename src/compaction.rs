@@ -9,7 +9,7 @@
 //! balancing write amplification and space amplification.
 
 use crate::{Key, Value, Result};
-use crate::sstable_new::{SsTableHandle, SsTableWriter, RunNumber};
+use crate::sstable::{SsTableHandle, SsTableWriter, RunNumber};
 use std::path::{Path, PathBuf};
 use std::collections::BTreeMap;
 use serde::{Serialize, Deserialize};
