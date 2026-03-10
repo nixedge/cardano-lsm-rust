@@ -10,7 +10,7 @@
 
 use crate::{Key, Value, Result};
 use crate::sstable::{SsTableHandle, SsTableWriter, RunNumber};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::collections::BTreeMap;
 use serde::{Serialize, Deserialize};
 
@@ -59,30 +59,14 @@ pub enum CompactionStrategy {
 /// Compaction manager for the LSM tree
 ///
 /// Selects which SSTables need compaction and executes merge operations
-/// according to the configured [`CompactionStrategy`].
+/// using the LazyLevelling policy.
 pub struct Compactor {
-    // NOTE: These fields are currently unused. The compaction strategy is configured
-    // via LsmConfig and applied through select_level_compaction() which implements
-    // LazyLevelling directly. These fields were part of an earlier design iteration.
-    // Kept for potential future use with different compaction strategies.
-    #[allow(dead_code)]
-    strategy: CompactionStrategy,
-    #[allow(dead_code)]
-    base_path: PathBuf,
 }
 
 impl Compactor {
-    /// Creates a new compactor with the specified strategy
-    ///
-    /// # Arguments
-    ///
-    /// * `strategy` - The compaction strategy to use (Tiered, Leveled, or Hybrid)
-    /// * `base_path` - Base directory path for SSTable storage
-    pub fn new(strategy: CompactionStrategy, base_path: PathBuf) -> Self {
-        Self {
-            strategy,
-            base_path,
-        }
+    /// Creates a new compactor
+    pub fn new() -> Self {
+        Self {}
     }
 
     /// Select compaction for level-based LSM tree using LazyLevelling policy

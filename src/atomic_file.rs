@@ -71,16 +71,6 @@ impl AtomicFileWriter {
             .write_all(data)
     }
 
-    /// Get mutable reference to the underlying writer
-    ///
-    /// Useful for writing with std::io::Write methods
-    #[allow(dead_code)]
-    pub fn as_writer(&mut self) -> io::Result<&mut dyn Write> {
-        self.file.as_mut()
-            .map(|f| f as &mut dyn Write)
-            .ok_or_else(|| io::Error::other("Writer already closed"))
-    }
-
     /// Commit the file atomically
     ///
     /// This:
@@ -112,18 +102,6 @@ impl AtomicFileWriter {
         // Mark as committed so Drop doesn't clean up
         self.committed = true;
 
-        Ok(())
-    }
-
-    /// Abort the write and clean up the temporary file
-    ///
-    /// This is called automatically on Drop if commit() wasn't called,
-    /// but you can call it explicitly if you want to handle errors.
-    #[allow(dead_code)]
-    pub fn abort(mut self) -> io::Result<()> {
-        self.file.take(); // Close the file
-        std::fs::remove_file(&self.temp_path)?;
-        self.committed = true; // Don't try to clean up again in Drop
         Ok(())
     }
 }
@@ -159,21 +137,6 @@ pub fn fsync_directory<P: AsRef<Path>>(path: P) -> io::Result<()> {
     }
 
     Ok(())
-}
-
-/// Atomically write a file in one shot
-///
-/// This is a convenience wrapper for:
-/// 1. Create AtomicFileWriter
-/// 2. Write all data
-/// 3. Commit
-///
-/// Returns Ok(()) if the file was successfully written and committed.
-#[allow(dead_code)]
-pub fn atomic_write<P: AsRef<Path>>(path: P, data: &[u8]) -> io::Result<()> {
-    let mut writer = AtomicFileWriter::new(path)?;
-    writer.write_all(data)?;
-    writer.commit()
 }
 
 #[cfg(test)]
@@ -218,34 +181,6 @@ mod tests {
         // Temp file should be cleaned up
         let temp_path = path.with_extension("dat.tmp");
         assert!(!temp_path.exists());
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_atomic_write_explicit_abort() -> io::Result<()> {
-        let dir = TempDir::new()?;
-        let path = dir.path().join("test.dat");
-
-        let mut writer = AtomicFileWriter::new(&path)?;
-        writer.write_all(b"this will be aborted")?;
-        writer.abort()?;
-
-        // File should NOT exist
-        assert!(!path.exists());
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_atomic_write_convenience() -> io::Result<()> {
-        let dir = TempDir::new()?;
-        let path = dir.path().join("test.dat");
-
-        atomic_write(&path, b"convenience")?;
-
-        let content = fs::read(&path)?;
-        assert_eq!(content, b"convenience");
 
         Ok(())
     }

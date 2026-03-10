@@ -538,10 +538,7 @@ impl LsmTree {
         }
         
         // Create compactor
-        let compactor = Arc::new(Compactor::new(
-            config.compaction_strategy.clone(),
-            path.clone(),
-        ));
+        let compactor = Arc::new(Compactor::new());
 
         Ok(Self {
             active_dir,
@@ -651,10 +648,7 @@ impl LsmTree {
         }
 
         // Create compactor
-        let compactor = Arc::new(Compactor::new(
-            config.compaction_strategy.clone(),
-            path.clone(),
-        ));
+        let compactor = Arc::new(Compactor::new());
 
         Ok(Self {
             active_dir,
