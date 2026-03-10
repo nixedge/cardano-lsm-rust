@@ -61,6 +61,10 @@ pub enum CompactionStrategy {
 /// Selects which SSTables need compaction and executes merge operations
 /// according to the configured [`CompactionStrategy`].
 pub struct Compactor {
+    // NOTE: These fields are currently unused. The compaction strategy is configured
+    // via LsmConfig and applied through select_level_compaction() which implements
+    // LazyLevelling directly. These fields were part of an earlier design iteration.
+    // Kept for potential future use with different compaction strategies.
     #[allow(dead_code)]
     strategy: CompactionStrategy,
     #[allow(dead_code)]
@@ -81,124 +85,6 @@ impl Compactor {
         }
     }
 
-    /// Selects which SSTables need compaction based on the configured strategy
-    ///
-    /// Analyzes the current set of SSTables and determines if compaction is needed.
-    /// Returns `None` if no compaction is required, or `Some(CompactionJob)` with
-    /// the indices of SSTables to merge.
-    ///
-    /// # Arguments
-    ///
-    /// * `sstables` - Slice of all active SSTables to consider for compaction
-    ///
-    /// # Returns
-    ///
-    /// `Option<CompactionJob>` describing which SSTables to compact, or `None` if
-    /// no compaction is needed yet.
-    #[allow(dead_code)]
-    pub fn select_compaction(&self, sstables: &[SsTableHandle]) -> Option<CompactionJob> {
-        match &self.strategy {
-            CompactionStrategy::Tiered { size_ratio, min_merge_width, max_merge_width } => {
-                self.select_tiered_compaction(sstables, *size_ratio, *min_merge_width, *max_merge_width)
-            }
-            CompactionStrategy::Leveled { size_ratio, max_level } => {
-                self.select_leveled_compaction(sstables, *size_ratio, *max_level)
-            }
-            CompactionStrategy::Hybrid { l0_strategy, ln_strategy, transition_level } => {
-                // For hybrid, use tiered for first few levels, leveled after
-                if sstables.len() <= *transition_level as usize {
-                    let temp_compactor = Compactor::new((**l0_strategy).clone(), self.base_path.clone());
-                    temp_compactor.select_compaction(sstables)
-                } else {
-                    let temp_compactor = Compactor::new((**ln_strategy).clone(), self.base_path.clone());
-                    temp_compactor.select_compaction(sstables)
-                }
-            }
-        }
-    }
-
-    #[allow(dead_code)]
-    fn select_tiered_compaction(
-        &self,
-        sstables: &[SsTableHandle],
-        size_ratio: f64,
-        min_merge_width: usize,
-        max_merge_width: usize,
-    ) -> Option<CompactionJob> {
-        // Tiered compaction: merge SSTables of similar size
-        if sstables.len() < min_merge_width {
-            return None;
-        }
-        
-        // Group SSTables by size tiers
-        let mut size_groups: Vec<Vec<usize>> = Vec::new();
-        
-        for (idx, sstable) in sstables.iter().enumerate() {
-            let size = sstable.num_entries;
-            let mut added = false;
-            
-            // Try to add to existing group
-            for group in &mut size_groups {
-                if let Some(&first_idx) = group.first() {
-                    let first_size = sstables[first_idx].num_entries;
-                    let ratio = (size as f64) / (first_size as f64);
-                    
-                    if ratio >= 1.0 / size_ratio && ratio <= size_ratio {
-                        group.push(idx);
-                        added = true;
-                        break;
-                    }
-                }
-            }
-            
-            if !added {
-                size_groups.push(vec![idx]);
-            }
-        }
-        
-        // Find the largest group that's ready to compact
-        for group in size_groups {
-            if group.len() >= min_merge_width {
-                let to_compact = group.into_iter().take(max_merge_width).collect();
-                return Some(CompactionJob {
-                    inputs: to_compact,
-                    strategy: CompactionStrategy::Tiered {
-                        size_ratio,
-                        min_merge_width,
-                        max_merge_width,
-                    },
-                });
-            }
-        }
-        
-        None
-    }
-
-    #[allow(dead_code)]
-    fn select_leveled_compaction(
-        &self,
-        sstables: &[SsTableHandle],
-        _size_ratio: f64,
-        _max_level: u8,
-    ) -> Option<CompactionJob> {
-        // Simplified leveled compaction: compact oldest SSTables
-        // In a real implementation, we'd organize into levels and compact level-by-level
-        
-        if sstables.len() >= 4 {
-            // Compact the 4 oldest SSTables
-            let to_compact: Vec<usize> = (0..4).collect();
-            return Some(CompactionJob {
-                inputs: to_compact,
-                strategy: CompactionStrategy::Leveled {
-                    size_ratio: _size_ratio,
-                    max_level: _max_level,
-                },
-            });
-        }
-        
-        None
-    }
-    
     /// Select compaction for level-based LSM tree using LazyLevelling policy
     ///
     /// LazyLevelling:
