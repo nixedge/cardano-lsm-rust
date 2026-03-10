@@ -31,26 +31,27 @@ The Cardano team developed their own LSM tree implementation in Haskell after ex
 ```
 cardano-lsm-rust/
 ├── src/
-│   ├── lib.rs                     # Core LSM tree implementation
-│   ├── sstable_new.rs             # SSTable format and I/O
-│   ├── compaction.rs              # Compaction strategies
-│   ├── snapshot.rs                # Snapshot functionality
-│   └── ...                        # Supporting modules
+│   ├── lib.rs                      # Core LSM tree implementation
+│   ├── sstable_new.rs              # SSTable format and I/O
+│   ├── compaction.rs               # Compaction strategies
+│   ├── snapshot.rs                 # Snapshot functionality
+│   ├── io_backend.rs               # I/O abstraction (sync/io_uring)
+│   └── ...                         # Supporting modules
 ├── tests/
-│   ├── conformance.rs             # 10,000+ conformance tests vs Haskell reference
-│   ├── test_rollback_insert.rs    # Rollback testing
-│   ├── test_snapshot_restoration.rs  # Snapshot save/restore
-│   ├── batch_operations.rs        # Batch insert/delete operations
-│   └── cross_format.rs            # Cross-format validation with Haskell
+│   ├── conformance.rs              # 10,000+ conformance tests vs Haskell reference
+│   ├── batch_operations.rs         # Batch insert/delete operations
+│   ├── cross_format.rs             # Cross-format validation with Haskell
+│   ├── test_rollback_insert.rs     # Rollback testing
+│   └── test_snapshot_restoration.rs  # Snapshot save/restore
 ├── benches/
-│   └── lsm_benchmarks.rs          # Performance benchmarks
+│   └── lsm_benchmarks.rs           # Performance benchmarks
 ├── Cargo.toml
 └── README.md
 ```
 
 ## Development Status
 
-**Current Version**: 1.0.0
+**Current Version**: 1.0.1
 
 This implementation is complete and production-ready:
 
@@ -75,58 +76,6 @@ cargo test --test conformance --release
 ```
 
 ## Test Suite
-
-### Basic Operations (test_basic_operations.rs)
-- Empty tree lookup
-- Single insert and lookup
-- Multiple inserts
-- Overwrite existing keys
-- Delete operations
-- Large batch inserts
-- Persistence across restarts
-- Concurrent reads
-- Sorted iteration
-
-### Range Queries (test_range_queries.rs)
-- Range scans (inclusive bounds)
-- Prefix scans
-- Empty ranges
-- Range queries with deletes
-- Large dataset scans
-- Address-like key patterns
-
-### Compaction (test_compaction.rs)
-- Data preservation during compaction
-- Tombstone removal
-- Overwrite handling
-- Tiered compaction strategy
-- Leveled compaction strategy
-- Hybrid compaction strategy
-- Compaction during reads
-- Space reduction
-- Multiple compaction rounds
-
-### WAL & Recovery (test_wal_recovery.rs)
-- Clean shutdown recovery
-- Crash recovery from WAL
-- Recovery with deletes
-- Recovery with overwrites
-- WAL sync modes
-- WAL truncation after flush
-- Partial entry recovery
-- Checksum validation
-- Multiple crash cycles
-
-### Snapshots (test_snapshots.rs)
-- Snapshot captures current state
-- Rollback to snapshot
-- Rollback with deletes
-- Rollback with overwrites
-- Multiple snapshots
-- **Snapshot is cheap** (< 10ms)
-- **Rollback is fast** (< 100ms)
-- Snapshot isolation
-- Blockchain-style rollback (simulates reorgs)
 
 ### Conformance Tests (conformance.rs)
 - **10,000+ property-based tests** validating Rust implementation against Haskell reference
