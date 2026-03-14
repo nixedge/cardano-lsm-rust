@@ -144,17 +144,24 @@ impl SsTableWriter {
         let max_key = self.entries.last().unwrap().0.clone();
         let num_entries = self.entries.len() as u64;
 
-        // Write keyops and blobs
+        // Write keyops and blobs, tracking byte offsets for the index
+        let mut keyops_offset: u64 = 0;
+        let mut key_offsets: Vec<u64> = Vec::with_capacity(self.entries.len());
         for (key, value_opt) in &self.entries {
+            // Record the byte offset of this entry in the keyops file
+            key_offsets.push(keyops_offset);
+
             // Write key
             let key_bytes = key.as_ref();
             self.keyops_writer.write_all(&(key_bytes.len() as u32).to_le_bytes())?;
             self.keyops_writer.write_all(key_bytes)?;
+            keyops_offset += 4 + key_bytes.len() as u64;
 
             // Write operation (Insert=1, Delete=0) and value
             match value_opt {
                 Some(value) => {
                     self.keyops_writer.write_all(&[1u8])?; // Insert operation
+                    keyops_offset += 1;
 
                     let value_bytes = value.as_ref();
                     let value_len = value_bytes.len() as u64;
@@ -162,6 +169,7 @@ impl SsTableWriter {
                     // Write blob offset and size to keyops
                     self.keyops_writer.write_all(&self.blob_offset.to_le_bytes())?;
                     self.keyops_writer.write_all(&value_len.to_le_bytes())?;
+                    keyops_offset += 16; // 8 bytes offset + 8 bytes length
 
                     // Write value to blobs
                     self.blobs_writer.write_all(value_bytes)?;
@@ -169,6 +177,7 @@ impl SsTableWriter {
                 }
                 None => {
                     self.keyops_writer.write_all(&[0u8])?; // Delete operation
+                    keyops_offset += 1;
                 }
             }
         }
@@ -189,9 +198,10 @@ impl SsTableWriter {
             .map_err(|e| Error::Serialization(e.to_string()))?;
         let filter_crc = crate::checksum_handle::write_file_with_checksum(&self.paths.filter, &filter_bytes)?;
 
-        // Build index (simple: just store all keys for now)
+        // Build index with keys and byte offsets for O(log n) point lookups
         let index = Index {
             keys: self.entries.iter().map(|(k, _)| k.as_ref().to_vec()).collect(),
+            offsets: key_offsets,
         };
 
         // Write index file
@@ -354,6 +364,10 @@ impl SsTableHandle {
     }
 
     /// Get a value by key using specific I/O backend
+    ///
+    /// Uses the index to perform O(log n) binary search on keys, then seeks
+    /// directly to the entry's byte offset in the keyops file. Only reads
+    /// the single entry instead of scanning the entire file.
     pub fn get_backend(&self, key: &Key, backend: &IoBackend) -> Result<Option<Value>> {
         // Check bloom filter first (fast negative lookup)
         if !self.bloom_filter.might_contain(key.as_ref()) {
@@ -362,18 +376,69 @@ impl SsTableHandle {
 
         // Binary search in index
         let key_bytes = key.as_ref();
-        let _pos = match self.index.keys.binary_search_by(|k| k.as_slice().cmp(key_bytes)) {
+        let pos = match self.index.keys.binary_search_by(|k| k.as_slice().cmp(key_bytes)) {
             Ok(pos) => pos,
-            Err(_) => return Ok(None), // Not found
+            Err(_) => return Ok(None), // Not found in index
         };
 
-        // For now, do a full scan - in a real implementation we'd use the index
-        // to jump to the right offset in the keyops file
-        let range_results = self.range_with_tombstones_backend(key, key, backend)?;
+        // If the index has byte offsets, seek directly to the entry
+        if !self.index.offsets.is_empty() {
+            let offset = self.index.offsets[pos];
+            return self.read_entry_at_offset(offset, key_bytes, backend);
+        }
 
+        // Legacy fallback: index has no offsets, do a full scan
+        let range_results = self.range_with_tombstones_backend(key, key, backend)?;
         if let Some((_, value_opt)) = range_results.first() {
             Ok(value_opt.clone())
         } else {
+            Ok(None)
+        }
+    }
+
+    /// Read a single keyops entry at the given byte offset.
+    fn read_entry_at_offset(
+        &self,
+        offset: u64,
+        expected_key: &[u8],
+        backend: &IoBackend,
+    ) -> Result<Option<Value>> {
+        // Read enough bytes for: key_len(4) + key + op(1) + blob_ref(16)
+        let read_len = 4 + expected_key.len() + 1 + 16;
+        let data = io_backend::read_range(&self.paths.keyops, offset, read_len, backend)?;
+
+        let mut cursor = std::io::Cursor::new(&data);
+
+        // Read and verify key
+        let key_len = cursor.read_u32::<LittleEndian>()? as usize;
+        if key_len != expected_key.len() {
+            // Offset corrupt; fall back to full scan
+            let range_results = self.range_with_tombstones_backend(
+                &Key::from(expected_key), &Key::from(expected_key), backend)?;
+            return Ok(range_results.first().and_then(|(_, v)| v.clone()));
+        }
+
+        let mut key_bytes = vec![0u8; key_len];
+        cursor.read_exact(&mut key_bytes)?;
+        if key_bytes != expected_key {
+            // Key mismatch; fall back to full scan
+            let range_results = self.range_with_tombstones_backend(
+                &Key::from(expected_key), &Key::from(expected_key), backend)?;
+            return Ok(range_results.first().and_then(|(_, v)| v.clone()));
+        }
+
+        // Read operation
+        let operation = cursor.read_u8()?;
+
+        if operation == 1 {
+            // Insert: fetch blob value
+            let blob_offset = cursor.read_u64::<LittleEndian>()?;
+            let value_len = cursor.read_u64::<LittleEndian>()? as usize;
+            let blob_data = io_backend::read_range(
+                &self.paths.blobs, blob_offset, value_len, backend)?;
+            Ok(Some(Value::from(&blob_data)))
+        } else {
+            // Delete (tombstone)
             Ok(None)
         }
     }
@@ -654,10 +719,22 @@ impl BloomFilter {
     }
 }
 
-/// Simple index structure
+/// Index structure mapping keys to byte offsets in the keyops file.
+///
+/// Each entry records the key bytes and the byte offset where that key's
+/// record starts in the keyops file. This enables O(log n) point lookups
+/// via binary search followed by a direct seek, instead of scanning the
+/// entire keyops file.
+///
+/// Backwards compatible: if `offsets` is empty (legacy index), callers
+/// fall back to a full scan.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Index {
     keys: Vec<Vec<u8>>,
+    /// Byte offset of each key's record in the keyops file.
+    /// Empty for legacy indexes created before this field was added.
+    #[serde(default)]
+    offsets: Vec<u64>,
 }
 
 #[cfg(test)]
@@ -836,6 +913,152 @@ mod tests {
 
         // Files should be deleted
         assert!(!paths.keyops.exists());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_index_based_get_single_key() -> Result<()> {
+        let dir = TempDir::new().map_err(Error::Io)?;
+        let active_dir = dir.path();
+
+        let mut writer = SsTableWriter::new(active_dir, 1)?;
+        writer.add(Key::from(b"alpha"), Some(Value::from(b"val_alpha")))?;
+        let handle = writer.finish(0)?;
+
+        assert_eq!(handle.index.offsets.len(), 1);
+        assert_eq!(handle.index.offsets[0], 0);
+
+        let val = handle.get(&Key::from(b"alpha"))?;
+        assert_eq!(val, Some(Value::from(b"val_alpha")));
+        assert_eq!(handle.get(&Key::from(b"beta"))?, None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_index_based_get_many_keys() -> Result<()> {
+        let dir = TempDir::new().map_err(Error::Io)?;
+        let active_dir = dir.path();
+
+        let mut writer = SsTableWriter::new(active_dir, 1)?;
+        for i in 0..100u32 {
+            let key = format!("key_{:05}", i);
+            let val = format!("value_{:05}", i);
+            writer.add(Key::from(key.as_bytes()), Some(Value::from(val.as_bytes())))?;
+        }
+        let handle = writer.finish(0)?;
+
+        assert_eq!(handle.index.offsets.len(), 100);
+        for i in 1..100 {
+            assert!(handle.index.offsets[i] > handle.index.offsets[i - 1]);
+        }
+
+        for i in 0..100u32 {
+            let key = format!("key_{:05}", i);
+            let expected = format!("value_{:05}", i);
+            let val = handle.get(&Key::from(key.as_bytes()))?;
+            assert_eq!(val, Some(Value::from(expected.as_bytes())));
+        }
+        assert_eq!(handle.get(&Key::from(b"nonexistent"))?, None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_index_based_get_with_tombstones() -> Result<()> {
+        let dir = TempDir::new().map_err(Error::Io)?;
+        let active_dir = dir.path();
+
+        let mut writer = SsTableWriter::new(active_dir, 1)?;
+        writer.add(Key::from(b"alive"), Some(Value::from(b"value")))?;
+        writer.add(Key::from(b"dead"), None)?;
+        writer.add(Key::from(b"zombie"), Some(Value::from(b"undead")))?;
+        let handle = writer.finish(0)?;
+
+        assert_eq!(handle.get(&Key::from(b"alive"))?, Some(Value::from(b"value")));
+        assert_eq!(handle.get(&Key::from(b"dead"))?, None);
+        assert_eq!(handle.get(&Key::from(b"zombie"))?, Some(Value::from(b"undead")));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_index_based_get_after_reopen() -> Result<()> {
+        let dir = TempDir::new().map_err(Error::Io)?;
+        let active_dir = dir.path();
+
+        let mut writer = SsTableWriter::new(active_dir, 1)?;
+        writer.add(Key::from(b"key1"), Some(Value::from(b"value1")))?;
+        writer.add(Key::from(b"key2"), Some(Value::from(b"value2")))?;
+        writer.add(Key::from(b"key3"), Some(Value::from(b"value3")))?;
+        let _handle = writer.finish(0)?;
+
+        let handle2 = SsTableHandle::open(active_dir, 1)?;
+        assert_eq!(handle2.index.offsets.len(), 3);
+        assert_eq!(handle2.get(&Key::from(b"key1"))?, Some(Value::from(b"value1")));
+        assert_eq!(handle2.get(&Key::from(b"key2"))?, Some(Value::from(b"value2")));
+        assert_eq!(handle2.get(&Key::from(b"key3"))?, Some(Value::from(b"value3")));
+        assert_eq!(handle2.get(&Key::from(b"missing"))?, None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_index_based_get_large_values() -> Result<()> {
+        let dir = TempDir::new().map_err(Error::Io)?;
+        let active_dir = dir.path();
+
+        let large_val = vec![0xABu8; 100_000];
+        let mut writer = SsTableWriter::new(active_dir, 1)?;
+        writer.add(Key::from(b"big1"), Some(Value::from(&large_val[..])))?;
+        writer.add(Key::from(b"big2"), Some(Value::from(&large_val[..])))?;
+        writer.add(Key::from(b"small"), Some(Value::from(b"tiny")))?;
+        let handle = writer.finish(0)?;
+
+        assert_eq!(handle.get(&Key::from(b"big1"))?.map(|v| v.as_ref().len()), Some(100_000));
+        assert_eq!(handle.get(&Key::from(b"big2"))?.map(|v| v.as_ref().len()), Some(100_000));
+        assert_eq!(handle.get(&Key::from(b"small"))?, Some(Value::from(b"tiny")));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_index_offsets_correct_format() -> Result<()> {
+        let dir = TempDir::new().map_err(Error::Io)?;
+        let active_dir = dir.path();
+
+        let mut writer = SsTableWriter::new(active_dir, 1)?;
+        // key "aa" (2 bytes) + value: 4 + 2 + 1 + 16 = 23 bytes
+        writer.add(Key::from(b"aa"), Some(Value::from(b"v")))?;
+        // key "bb" (2 bytes) + tombstone: 4 + 2 + 1 = 7 bytes
+        writer.add(Key::from(b"bb"), None)?;
+        // key "cc" (2 bytes) + value
+        writer.add(Key::from(b"cc"), Some(Value::from(b"w")))?;
+        let handle = writer.finish(0)?;
+
+        assert_eq!(handle.index.offsets[0], 0);
+        assert_eq!(handle.index.offsets[1], 23);
+        assert_eq!(handle.index.offsets[2], 30);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_range_query_still_works_with_offsets() -> Result<()> {
+        let dir = TempDir::new().map_err(Error::Io)?;
+        let active_dir = dir.path();
+
+        let mut writer = SsTableWriter::new(active_dir, 1)?;
+        for i in 0..10u32 {
+            let key = format!("k{:02}", i);
+            let val = format!("v{:02}", i);
+            writer.add(Key::from(key.as_bytes()), Some(Value::from(val.as_bytes())))?;
+        }
+        let handle = writer.finish(0)?;
+
+        let results = handle.range(&Key::from(b"k02"), &Key::from(b"k05"))?;
+        assert_eq!(results.len(), 4);
 
         Ok(())
     }
